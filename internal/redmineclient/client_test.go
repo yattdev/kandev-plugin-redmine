@@ -1,0 +1,91 @@
+package redmineclient_test
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"kandev-plugin-redmine/internal/redmineclient"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestValidateCredentials_ValidKey_ReturnsUser(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/users/current.json", r.URL.Path)
+		require.Equal(t, "s3cret", r.Header.Get("X-Redmine-API-Key"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"user":{"id":1,"login":"alice","firstname":"Alice","lastname":"Anderson","admin":true}}`))
+	}))
+	defer srv.Close()
+
+	c := redmineclient.New(srv.URL, "s3cret", srv.Client())
+	user, err := c.ValidateCredentials(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, user.ID)
+	require.Equal(t, "alice", user.Login)
+	require.True(t, user.Admin)
+}
+
+func TestValidateCredentials_InvalidKey_ReturnsDistinctError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := redmineclient.New(srv.URL, "bad-key", srv.Client())
+	_, err := c.ValidateCredentials(context.Background())
+	require.Error(t, err)
+
+	var apiErr *redmineclient.APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, redmineclient.ErrKindInvalidCredentials, apiErr.Kind)
+	require.Equal(t, http.StatusUnauthorized, apiErr.StatusCode)
+}
+
+func TestValidateCredentials_APIDisabled_ReturnsDistinctError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := redmineclient.New(srv.URL, "s3cret", srv.Client())
+	_, err := c.ValidateCredentials(context.Background())
+	require.Error(t, err)
+
+	var apiErr *redmineclient.APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, redmineclient.ErrKindAPIDisabled, apiErr.Kind)
+}
+
+func TestValidateCredentials_Unreachable_ReturnsDistinctError(t *testing.T) {
+	// A closed listener: connection refused, never reaches the fake server.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	unreachableURL := srv.URL
+	srv.Close()
+
+	c := redmineclient.New(unreachableURL, "s3cret", http.DefaultClient)
+	_, err := c.ValidateCredentials(context.Background())
+	require.Error(t, err)
+
+	var apiErr *redmineclient.APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, redmineclient.ErrKindUnreachable, apiErr.Kind)
+}
+
+func TestValidateCredentials_UnexpectedStatus_ReturnsDistinctError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := redmineclient.New(srv.URL, "s3cret", srv.Client())
+	_, err := c.ValidateCredentials(context.Background())
+	require.Error(t, err)
+
+	var apiErr *redmineclient.APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, redmineclient.ErrKindUnexpected, apiErr.Kind)
+	require.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+}

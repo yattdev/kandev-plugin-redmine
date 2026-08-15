@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/kandev/kandev v0.0.0-00010101000000-000000000000
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/crypto v0.55.0
 )
 
 require (
@@ -18,9 +19,9 @@ require (
 	github.com/mattn/go-isatty v0.0.19 // indirect
 	github.com/oklog/run v1.1.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.39.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 	google.golang.org/grpc v1.82.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect

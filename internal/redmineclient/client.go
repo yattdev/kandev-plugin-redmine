@@ -1,0 +1,136 @@
+// Package redmineclient is a minimal REST client for the Redmine issue
+// tracker's JSON API. It owns HTTP plumbing (auth header, error
+// classification) shared by every endpoint method; auth (this file),
+// project/field listing, and issue read/write live in sibling files added by
+// later plan tasks.
+package redmineclient
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+)
+
+// Client talks to one Redmine instance under one API key. It holds no
+// per-workspace state; callers (internal/connection) own composing one
+// Client per connected workspace.
+type Client struct {
+	baseURL    string
+	apiKey     string
+	httpClient *http.Client
+}
+
+// New builds a Client. httpClient must not be nil; callers own its timeout
+// and transport configuration (proxy env vars are honored for free by Go's
+// default transport, per the spec's Network section).
+func New(baseURL, apiKey string, httpClient *http.Client) *Client {
+	return &Client{
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		apiKey:     apiKey,
+		httpClient: httpClient,
+	}
+}
+
+// ErrorKind distinguishes the failure taxonomy the spec requires: a plugin
+// action error code, never a bare host-level 401 (see spec "Failure modes").
+type ErrorKind string
+
+const (
+	ErrKindInvalidCredentials ErrorKind = "invalid_credentials"
+	ErrKindAPIDisabled        ErrorKind = "api_disabled"
+	ErrKindUnreachable        ErrorKind = "unreachable"
+	ErrKindUnexpected         ErrorKind = "unexpected"
+)
+
+// APIError is the distinct, typed error every redmineclient call returns on
+// failure. Callers switch on Kind rather than inspecting StatusCode/text.
+type APIError struct {
+	Kind       ErrorKind
+	StatusCode int
+	Message    string
+}
+
+func (e *APIError) Error() string { return e.Message }
+
+// newRequest builds an authenticated GET request against path (which must
+// start with "/"), with query parameters merged in.
+func (c *Client) newRequest(ctx context.Context, method, path string, query map[string]string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("redmineclient: building request: %w", err)
+	}
+	req.Header.Set("X-Redmine-API-Key", c.apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	q := req.URL.Query()
+	for k, v := range query {
+		q.Set(k, v)
+	}
+	req.URL.RawQuery = q.Encode()
+	return req, nil
+}
+
+// do executes req and classifies a non-2xx response or transport failure
+// into a typed *APIError. On success it decodes the JSON body into out (skip
+// decoding by passing a nil out, e.g. for 204 responses).
+func (c *Client) do(req *http.Request, out any) error {
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return &APIError{Kind: ErrKindUnreachable, Message: fmt.Sprintf("redmineclient: %s %s: %v", req.Method, req.URL.Path, err)}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return classifyErrorStatus(resp.StatusCode, req.URL.Path)
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return &APIError{Kind: ErrKindUnexpected, StatusCode: resp.StatusCode, Message: fmt.Sprintf("redmineclient: decoding response from %s: %v", req.URL.Path, err)}
+	}
+	return nil
+}
+
+func classifyErrorStatus(statusCode int, path string) *APIError {
+	switch statusCode {
+	case http.StatusUnauthorized:
+		return &APIError{Kind: ErrKindInvalidCredentials, StatusCode: statusCode, Message: "redmineclient: Redmine rejected the API key"}
+	case http.StatusForbidden:
+		return &APIError{Kind: ErrKindAPIDisabled, StatusCode: statusCode, Message: "redmineclient: Redmine's REST API is disabled (Administration > Settings > API)"}
+	default:
+		return &APIError{Kind: ErrKindUnexpected, StatusCode: statusCode, Message: fmt.Sprintf("redmineclient: unexpected status %d from %s", statusCode, path)}
+	}
+}
+
+// User is the subset of Redmine's /users/current.json response this plugin
+// uses.
+type User struct {
+	ID        int    `json:"id"`
+	Login     string `json:"login"`
+	Firstname string `json:"firstname"`
+	Lastname  string `json:"lastname"`
+	Admin     bool   `json:"admin"`
+}
+
+type currentUserResponse struct {
+	User User `json:"user"`
+}
+
+// ValidateCredentials calls GET /users/current.json — the spec's chosen
+// validation endpoint, distinguishing invalid-credentials (401),
+// API-disabled (403), and unreachable-host failures from a generic
+// unexpected error.
+func (c *Client) ValidateCredentials(ctx context.Context) (*User, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, "/users/current.json", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out currentUserResponse
+	if err := c.do(req, &out); err != nil {
+		return nil, err
+	}
+	return &out.User, nil
+}
