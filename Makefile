@@ -1,5 +1,4 @@
-.PHONY: build run test test-backend test-recipes typecheck-recipes audit-recipes \
-	fmt vet package package-host verify-package verify-package-host clean
+.PHONY: build run test test-backend fmt vet package package-host verify-package verify-package-host clean
 
 # When you rename the plugin, update BIN and VERSION to match manifest.yaml's
 # id and version (PKG_OUT is derived from them).
@@ -32,25 +31,16 @@ build:
 run: build
 	./$(BIN)
 
-test: test-backend typecheck-recipes test-recipes
+test: test-backend
 
 test-backend:
-	go test ./server/... ./recipes/source-control/server/...
-
-test-recipes:
-	npm run test:recipes
-
-typecheck-recipes:
-	npm run typecheck:recipes
-
-audit-recipes:
-	npm audit --audit-level=high
+	go test ./... -race
 
 fmt:
 	gofmt -l .
 
 vet:
-	go vet ./server/... ./recipes/source-control/server/...
+	go vet ./...
 
 ## Cross-compile server/plugin-<goos>-<goarch>[.exe] for every platform in
 ## manifest.yaml's runtime.executables, stage manifest.yaml + ui/ alongside

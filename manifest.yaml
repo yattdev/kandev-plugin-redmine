@@ -1,43 +1,24 @@
-# kandev plugin manifest — the single declarative contract between your
-# plugin and a kandev host. Everything kandev needs to install, spawn, and
-# route to your plugin is described here. Start by renaming the plugin:
-# change `id`, `display_name`, `description`, and `author` to your own.
+# kandev plugin manifest for the Redmine connector.
 #
-# `id` MUST match the Go module name in go.mod and the id you pass to
-# window.registerKandevPlugin(...) in ui/bundle.js, and it is the prefix of
-# every route kandev serves for you (/api/plugins/<id>/...). Keep the three
-# in sync when you rename.
+# `id` MUST match the Go module name in go.mod and the id passed to
+# window.registerKandevPlugin(...) in ui/bundle.js — it is also the prefix of
+# every route kandev serves for this plugin (/api/plugins/<id>/...).
 id: "kandev-plugin-redmine"
 api_version: 1
 version: "0.1.0"
 display_name: "Redmine"
 description: "Connect a Redmine instance: link kandev tasks to Redmine issues, sync status both ways, and watch for new issues."
 author: "kandev"
-categories: ["tools"]
+categories: ["connector"]
+repo_url: "https://github.com/yattdev/kandev-plugin-redmine"
 
-# min_kandev_version is the oldest kandev release this plugin will install
-# against. A release host compares it to its own version at install time and
-# refuses the package if it is older, so an operator gets a clear error instead
-# of a plugin that loads and then fails on a missing API.
-#
-# 0.86.0 is the floor for THIS template, not a default to copy blindly: it is
-# the first release carrying the host.ui primitives, host.toast and host.utils
-# that ui/bundle.js below actually calls. Raise it when you start using a newer
-# host API; you can lower or drop it if you strip the bundle back to the
-# pre-0.86 surface (Button, Card*, Tooltip*).
-#
-# Two things worth knowing about the check. It only became load-bearing in
-# 0.86.0 — earlier hosts parsed the field and silently ignored it. And it is
-# release-only by design: a host built from a git checkout reports something
-# like "v0.87.1-27-g4705f1fd0", which is not a release version, so the gate is
-# skipped and the install succeeds whatever you put here. Don't read a
-# successful sideload onto your dev instance as proof the floor is right.
-min_kandev_version: "0.86.0"
+# min_kandev_version: "0.88.0" is the release that first carries PR #2117's
+# generic plugin seams this plugin depends on (registerIntegrationSettings,
+# registerTaskAction({placement:"link"}), reference_sources, the
+# PluginOwnedTaskTrees RPCs) — merge commit f218880e is first reachable from
+# tag v0.88.0.
+min_kandev_version: "0.88.0"
 
-# runtime.executables maps each supported platform to the binary kandev
-# spawns as a gRPC subprocess. `make package` cross-compiles all five;
-# `make package-host` builds just the current one. The paths are relative to
-# the package root and must match what the Makefile writes into server/.
 runtime:
   type: binary
   executables:
@@ -47,75 +28,61 @@ runtime:
     darwin-arm64: "server/plugin-darwin-arm64"
     windows-amd64: "server/plugin-windows-amd64.exe"
 
-# capabilities gate what the host will do for you. Declare only what you use.
-#   events: WS/backend event types delivered to Plugin.OnEvent (server side).
-#   state:  enables the Host GetState/SetState/... key-value store.
-# Other capabilities exist (e.g. api_read for the Host data API) — see the
-# kandev plugin docs. Remove `events`/`state` if your plugin doesn't need them.
+# Least privilege: only the capabilities this plugin actually exercises.
+#   state    - connection metadata, sync cursor, health state, echo-suppression
+#              bookkeeping, watch dedup/throttle state (all scoped "workspace"
+#              or "task" per key, never global).
+#   secrets  - the workspace-composed, encrypted Redmine API key
+#              (redmine:<workspace_id>:api_key). No config_schema secret field
+#              is used: the API key is workspace-scoped, not plugin-install-scoped.
+#   api_read/api_write: ["tasks"] - reading/creating/updating tasks for watcher
+#              task creation and reading the linked task's current state during
+#              sync/write-back. Task linking itself is plugin-owned state
+#              (Tasks().Update has no metadata field to write a link onto — see
+#              docs/plans/redmine-plugin/task-06-task-linking-bidirectional-sync.md
+#              "Plan deviations"), matching the kandev-plugin-bitbucket precedent.
+# No `events` capability: sync and watcher polling run on the plugin's own
+# timers (spec "OnEvent — none required for v1"), not host event delivery.
 capabilities:
-  events: ["task.created"]
   state: true
+  secrets: true
+  api_read: ["tasks"]
+  api_write: ["tasks"]
 
-# Git-provider plugins should opt into recipes/source-control/ as one complete
-# slice. Its provider ownership, actions, reference source, and extra Host
-# capabilities are intentionally absent here so generated plugins do not claim
-# a fake provider or permissions they do not use.
+# actions: the plugin's own native settings UI calls these via
+# host.api.invokeAction (never host.api.fetch, which cannot reach them). Every
+# action re-derives its plugin_state/secret keys from the host-verified
+# VerifiedActionContext.WorkspaceID/TaskID, never from a request-body-supplied
+# one (spec "Connection, permissions, and secrets").
+actions:
+  - { key: "connection.get", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "connection.save", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "connection.disconnect", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "projects.list", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "projects.save", scope: "workspace", max_body_bytes: 32768 }
+  - { key: "fieldmapping.get", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "fieldmapping.save", scope: "workspace", max_body_bytes: 65536 }
+  - { key: "syncoptions.save", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "link.get", scope: "task", max_body_bytes: 8192 }
+  - { key: "link.set", scope: "task", max_body_bytes: 8192 }
+  - { key: "link.unset", scope: "task", max_body_bytes: 8192 }
+  - { key: "link.set_status", scope: "task", max_body_bytes: 8192 }
+  - { key: "watches.list", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "watches.create", scope: "workspace", max_body_bytes: 32768 }
+  - { key: "watches.update", scope: "workspace", max_body_bytes: 32768 }
+  - { key: "watches.delete", scope: "workspace", max_body_bytes: 8192 }
 
-# webhooks kandev proxies to Plugin.HandleWebhook at
-# POST /api/plugins/<id>/webhooks/<key>. Delete this block if unused.
-#
-# Always spell `access` out. It is optional and currently defaults to `public`,
-# but an open kandev PR proposes inverting that default to `authenticated` — so
-# a manifest that omits it is a manifest whose security posture changes under
-# it on a host upgrade. Declaring it is correct under either default.
-#
-# Pick the value deliberately; the two are for different callers:
-#   public         anonymous callers. Correct for a webhook a third party
-#                  delivers to (GitHub, Slack, Stripe) — those senders have no
-#                  kandev identity to present. Your handler owns its own
-#                  verification (signature header, shared secret in a `secret:`
-#                  config field). Body limit is capped at 4 MiB.
-#   authenticated  requires a kandev identity (session cookie or PAT). Correct
-#                  for a webhook only your own scripts or CI call. Raises the
-#                  max_body_bytes ceiling to 16 MiB.
-#
-# This example is `public` because it exists to demonstrate the external
-# delivery path — that is what makes it curl-able from anywhere with no
-# credential, which is exactly why a real public webhook must authenticate its
-# caller itself.
-#
-# If what you actually want is to call your plugin from your OWN frontend
-# bundle, neither value is right: use an `actions:` entry instead. The host
-# authenticates and authorizes those, and host.api.fetch is documented as MUST
-# NOT target a public webhook path.
-webhooks:
-  - key: "ping"
-    description: "Example inbound webhook; logs the delivery and returns 200."
-    method: "POST"
-    access: "public"
+# reference_sources: composer `#` mentions resolve Redmine issues through
+# SearchEntityReferences/AuthorizeEntityReference (backend, task 06/08) with
+# submit-time reauthorization. No repository_providers: Redmine is an issue
+# tracker, not a git host.
+reference_sources:
+  - source: "redmine-issues"
+    provider: "redmine"
+    kind: "issue"
+    display_name: "Redmine issues"
+    kind_label: "Issue"
+    order: 40
 
-# ui.bundle points at your hand-written, no-build ES module frontend half.
-# Remove this section for a backend-only plugin.
 ui:
   bundle: "/ui/bundle.js"
-
-# config_schema declares operator-editable settings, rendered as a form at
-# Settings > Plugins > <display_name>. The plugin process reads saved values
-# through the Host GetConfig RPC (see greeting() in server/plugin.go, which
-# uses it to build the webhook reply). Fields marked `secret: true` render as
-# password inputs, are stored in kandev's encrypted vault, and are masked
-# everywhere except inside the plugin process. Delete this block if your
-# plugin has no settings.
-config_schema:
-  type: object
-  properties:
-    greeting:
-      type: string
-      title: "Greeting"
-      description: "Word the ping webhook reply starts with (empty = \"Hello\")."
-      default: "Hello"
-    api_token:
-      type: string
-      title: "API token"
-      description: "Example secret setting: masked in the UI and on the operator API, cleartext only inside the plugin process."
-      secret: true

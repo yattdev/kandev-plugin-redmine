@@ -39,17 +39,6 @@ jobs:
           go-version-file: plugin/go.mod
           cache-dependency-path: plugin/go.sum
 
-      - name: Set up Node
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: plugin/package-lock.json
-
-      - name: Install recipe test dependencies
-        working-directory: plugin
-        run: npm ci --ignore-scripts
-
       - name: Check module files are tidy
         working-directory: plugin
         run: |
@@ -67,12 +56,10 @@ jobs:
 
       - name: Test
         working-directory: plugin
-        run: |
-          make test
-          make audit-recipes
+        run: make test
 
-  base-floor:
-    name: Default template on Kandev v0.86.0
+  declared-minimum:
+    name: Server on declared minimum Kandev (v0.88.0)
     runs-on: ubuntu-latest
     steps:
       - name: Check out plugin
@@ -85,7 +72,9 @@ jobs:
         with:
           repository: kdlbs/kandev
           path: kandev
-          ref: v0.86.0
+          # Keep this aligned with manifest.min_kandev_version so PR checks
+          # prove compatibility against the oldest supported Kandev release.
+          ref: v0.88.0
           sparse-checkout: apps/backend
 
       - name: Set up Go
@@ -94,6 +83,6 @@ jobs:
           go-version-file: plugin/go.mod
           cache-dependency-path: plugin/go.sum
 
-      - name: Test provider-free generated backend
+      - name: Test against declared minimum SDK
         working-directory: plugin
         run: go test ./server/...
