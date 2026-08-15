@@ -59,6 +59,14 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleLinkUnset(ctx, req)
 	case "link.set_status":
 		return p.handleLinkSetStatus(ctx, req)
+	case "watches.list":
+		return p.handleWatchesList(ctx, req)
+	case "watches.create":
+		return p.handleWatchesCreate(ctx, req)
+	case "watches.update":
+		return p.handleWatchesUpdate(ctx, req)
+	case "watches.delete":
+		return p.handleWatchesDelete(ctx, req)
 	default:
 		return nil, fmt.Errorf("redmine: unknown action %q", req.ActionKey)
 	}
@@ -143,7 +151,20 @@ func (p *redminePlugin) handleConnectionSave(ctx context.Context, req *pluginsdk
 	return jsonResponse(connectionResponse{State: string(record.State), BaseURL: record.BaseURL, LastOK: record.LastOK})
 }
 
+// handleConnectionDisconnect deletes every watch for the workspace first
+// (cascading their created task trees via PluginOwnedTaskTrees) before
+// removing the connection itself, so deleting a connection never leaves
+// orphaned watcher tasks behind (spec "Failure modes").
 func (p *redminePlugin) handleConnectionDisconnect(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	watches, err := p.watchSvc.ListWatches(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range watches {
+		if err := p.watchSvc.DeleteWatch(ctx, req.Context.WorkspaceID, w.ID); err != nil {
+			return nil, err
+		}
+	}
 	if err := p.connectionSvc.Disconnect(ctx, req.Context.WorkspaceID); err != nil {
 		return nil, err
 	}

@@ -25,6 +25,7 @@ import (
 	"kandev-plugin-redmine/internal/projects"
 	redminesync "kandev-plugin-redmine/internal/sync"
 	"kandev-plugin-redmine/internal/tasklink"
+	"kandev-plugin-redmine/internal/watch"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
 )
@@ -47,6 +48,7 @@ type redminePlugin struct {
 	fieldmappingSvc *fieldmapping.Service
 	tasklinkSvc     *tasklink.Service
 	syncSvc         *redminesync.Service
+	watchSvc        *watch.Service
 	healthPoller    *connection.HealthPoller
 }
 
@@ -72,6 +74,7 @@ func (p *redminePlugin) SetHost(host pluginsdk.Host) {
 	p.fieldmappingSvc = fieldmapping.New(host)
 	p.tasklinkSvc = tasklink.New(host)
 	p.syncSvc = redminesync.New(host, p.tasklinkSvc)
+	p.watchSvc = watch.New(host)
 	p.healthPoller = connection.NewHealthPoller(p.connectionSvc)
 	p.ready = true
 
@@ -109,6 +112,19 @@ func (p *redminePlugin) pollAllWorkspaces(ctx context.Context) {
 }
 
 func (p *redminePlugin) pollWorkspace(ctx context.Context, workspaceID string) error {
+	client, err := p.connectionSvc.Client(ctx, workspaceID)
+	if err != nil {
+		return nil // not connected (or credentials rejected) - nothing to poll
+	}
+	issuesSvc := issues.New(client)
+
+	if err := p.pollSync(ctx, workspaceID, issuesSvc); err != nil {
+		return err
+	}
+	return p.pollWatches(ctx, workspaceID, issuesSvc)
+}
+
+func (p *redminePlugin) pollSync(ctx context.Context, workspaceID string, issuesSvc *issues.Service) error {
 	projectIDs, err := p.projectsSvc.GetSelection(ctx, workspaceID)
 	if err != nil || len(projectIDs) == 0 {
 		return err
@@ -124,13 +140,20 @@ func (p *redminePlugin) pollWorkspace(ctx context.Context, workspaceID string) e
 		return err
 	}
 
-	client, err := p.connectionSvc.Client(ctx, workspaceID)
-	if err != nil {
-		return nil // not connected (or credentials rejected) - nothing to poll
-	}
-	issuesSvc := issues.New(client)
-
 	return p.syncSvc.PollInbound(ctx, workspaceID, issuesSvc, mapping, projectIDs, opts)
+}
+
+func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, issuesSvc *issues.Service) error {
+	watches, err := p.watchSvc.ListWatches(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	for _, w := range watches {
+		if err := p.watchSvc.Poll(ctx, w, issuesSvc); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // OnEvent handles task.moved for near-real-time outbound write-back (see

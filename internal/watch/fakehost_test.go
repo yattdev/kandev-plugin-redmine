@@ -1,0 +1,152 @@
+package watch
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sync"
+
+	"github.com/kandev/kandev/pkg/pluginsdk"
+)
+
+// fakeHost is an in-memory pluginsdk.Host test double with a capturing,
+// stateful Tasks() (Create/Get) and PluginOwnedTaskTrees, so tests can
+// assert on real create/throttle/cascade-delete round trips.
+type fakeHost struct {
+	pluginsdk.UnimplementedHostData
+
+	mu      sync.Mutex
+	state   map[string]map[string]any
+	tasks   map[string]*pluginsdk.Task
+	nextID  int
+	deleted []string
+}
+
+func newFakeHost() *fakeHost {
+	return &fakeHost{state: make(map[string]map[string]any), tasks: make(map[string]*pluginsdk.Task)}
+}
+
+func key(scope, scopeID, k string) string { return scope + "/" + scopeID + "/" + k }
+
+func (h *fakeHost) GetState(_ context.Context, scope, scopeID, k string) (map[string]any, bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	v, ok := h.state[key(scope, scopeID, k)]
+	return v, ok, nil
+}
+
+func (h *fakeHost) SetState(_ context.Context, scope, scopeID, k string, value map[string]any) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	data, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		panic(err)
+	}
+	h.state[key(scope, scopeID, k)] = out
+	return nil
+}
+
+func (h *fakeHost) DeleteState(_ context.Context, scope, scopeID, k string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.state, key(scope, scopeID, k))
+	return nil
+}
+
+func (h *fakeHost) ListState(context.Context, string, string) ([]pluginsdk.StateEntry, error) {
+	return nil, nil
+}
+func (h *fakeHost) GetConfig(context.Context) (map[string]any, error) { return map[string]any{}, nil }
+func (h *fakeHost) RevealSecret(context.Context, string) (string, error) {
+	return "", nil
+}
+func (h *fakeHost) GetSecret(context.Context, string) (string, bool, error) { return "", false, nil }
+func (h *fakeHost) SetSecret(context.Context, string, string) error         { return nil }
+func (h *fakeHost) DeleteSecret(context.Context, string) error              { return nil }
+func (h *fakeHost) EmitEvent(context.Context, string, map[string]any) error { return nil }
+
+func (h *fakeHost) Tasks() pluginsdk.TaskReader {
+	return fakeTaskReader{TaskReader: pluginsdk.UnimplementedHostData{}.Tasks(), host: h}
+}
+
+func (h *fakeHost) PluginOwnedTaskTrees() pluginsdk.PluginOwnedTaskTreeManager {
+	return fakeTaskTreeManager{host: h}
+}
+
+// setTaskState lets a test move a created task to a terminal state, to
+// exercise the throttle's "still open" check.
+func (h *fakeHost) setTaskState(taskID, state string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if t, ok := h.tasks[taskID]; ok {
+		t.State = state
+	}
+}
+
+func (h *fakeHost) deletedTaskIDs() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.deleted...)
+}
+
+type fakeTaskReader struct {
+	pluginsdk.TaskReader
+	host *fakeHost
+}
+
+func (r fakeTaskReader) Create(_ context.Context, in pluginsdk.CreateTaskInput) (*pluginsdk.Task, error) {
+	r.host.mu.Lock()
+	defer r.host.mu.Unlock()
+	r.host.nextID++
+	task := &pluginsdk.Task{
+		ID: fmt.Sprintf("task-%d", r.host.nextID), WorkspaceID: in.WorkspaceID,
+		Title: in.Title, Description: in.Description, State: "RUNNING", Metadata: in.Metadata,
+	}
+	r.host.tasks[task.ID] = task
+	return task, nil
+}
+
+func (r fakeTaskReader) Get(_ context.Context, id string) (*pluginsdk.Task, error) {
+	r.host.mu.Lock()
+	defer r.host.mu.Unlock()
+	task, ok := r.host.tasks[id]
+	if !ok {
+		return nil, fmt.Errorf("fakeHost: task %s not found", id)
+	}
+	copyTask := *task
+	return &copyTask, nil
+}
+
+type fakeTaskTreeManager struct {
+	host *fakeHost
+}
+
+func (m fakeTaskTreeManager) Preview(_ context.Context, rootTaskID string) ([]pluginsdk.Task, error) {
+	m.host.mu.Lock()
+	defer m.host.mu.Unlock()
+	task, ok := m.host.tasks[rootTaskID]
+	if !ok {
+		return nil, nil
+	}
+	return []pluginsdk.Task{*task}, nil
+}
+
+func (m fakeTaskTreeManager) Delete(_ context.Context, rootTaskID string) ([]string, error) {
+	m.host.mu.Lock()
+	defer m.host.mu.Unlock()
+	if _, ok := m.host.tasks[rootTaskID]; !ok {
+		return []string{}, nil
+	}
+	delete(m.host.tasks, rootTaskID)
+	m.host.deleted = append(m.host.deleted, rootTaskID)
+	return []string{rootTaskID}, nil
+}
+
+var (
+	_ pluginsdk.Host                    = (*fakeHost)(nil)
+	_ pluginsdk.PluginOwnedTaskTreeHost = (*fakeHost)(nil)
+)
