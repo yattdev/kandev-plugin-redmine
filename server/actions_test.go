@@ -148,6 +148,20 @@ func TestOnEvent_TaskMoved_PushesWritebackForLinkedTaskWithMappedStep(t *testing
 	require.Empty(t, host.updateCalls())
 }
 
+func TestHandleAction_WorkflowsList_ReturnsWorkflowsWithSteps(t *testing.T) {
+	p, _ := newTestPlugin()
+	out := handle(t, p, "workflows.list", "ws-1", "", nil)
+	workflows, ok := out["workflows"].([]any)
+	require.True(t, ok)
+	require.Len(t, workflows, 1)
+	wf, ok := workflows[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "wf-1", wf["id"])
+	steps, ok := wf["steps"].([]any)
+	require.True(t, ok)
+	require.Len(t, steps, 2)
+}
+
 func TestOnEvent_TaskMoved_AutoWritebackEnabled_PushesStatus(t *testing.T) {
 	p, _ := newTestPlugin()
 

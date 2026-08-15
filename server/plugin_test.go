@@ -92,6 +92,23 @@ func (h *fakeHost) Tasks() pluginsdk.TaskReader {
 	return fakeTaskReader{TaskReader: pluginsdk.UnimplementedHostData{}.Tasks(), host: h}
 }
 
+func (h *fakeHost) Workflows() pluginsdk.WorkflowReader { return fakeWorkflowReader{} }
+
+// fakeWorkflowReader returns one fixed workflow with two steps, enough to
+// exercise the workflows.list action without a real Kandev host.
+type fakeWorkflowReader struct{}
+
+func (fakeWorkflowReader) List(context.Context, string, pluginsdk.Page) ([]pluginsdk.Workflow, *pluginsdk.PageInfo, error) {
+	return []pluginsdk.Workflow{{ID: "wf-1", Name: "Default"}}, nil, nil
+}
+
+func (fakeWorkflowReader) ListSteps(context.Context, string) ([]pluginsdk.WorkflowStep, error) {
+	return []pluginsdk.WorkflowStep{
+		{ID: "step-backlog", Name: "Backlog"},
+		{ID: "step-done", Name: "Done"},
+	}, nil
+}
+
 func (h *fakeHost) updateCalls() []pluginsdk.UpdateTaskInput {
 	h.mu.Lock()
 	defer h.mu.Unlock()

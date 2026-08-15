@@ -45,6 +45,8 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleProjectsList(ctx, req)
 	case "projects.save":
 		return p.handleProjectsSave(ctx, req)
+	case "workflows.list":
+		return p.handleWorkflowsList(ctx, req)
 	case "fieldmapping.get":
 		return p.handleFieldMappingGet(ctx, req)
 	case "fieldmapping.save":

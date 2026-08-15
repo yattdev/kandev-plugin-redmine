@@ -37,10 +37,17 @@ runtime:
 #              secret-key pattern rejects colons). No config_schema secret
 #              field is used: the API key is workspace-scoped, not
 #              plugin-install-scoped.
-#   api_read/api_write: ["tasks"] - reading/creating/updating tasks for watcher
-#              task creation and reading the linked task's current state during
-#              sync/write-back. Task linking itself is plugin-owned state
-#              (Tasks().Update has no metadata field to write a link onto — see
+#   api_read: ["tasks", "workflows"] - tasks: reading the linked task's current
+#              state during sync/write-back. workflows: the field-mapping UI
+#              lists the connection's target workflow's steps
+#              (Workflows().List/.ListSteps) so status mappings pick a real
+#              step id rather than a free-text string (spec explicitly scopes
+#              one connection to one workflow — "Out of scope: mapping
+#              Redmine statuses across more than one Kandev workflow").
+#   api_write: ["tasks"] - creating watcher tasks and updating already-linked
+#              tasks during sync/write-back. Task linking itself is
+#              plugin-owned state (Tasks().Update has no metadata field to
+#              write a link onto an existing task — see
 #              docs/plans/redmine-plugin/task-06-task-linking-bidirectional-sync.md
 #              "Plan deviations"), matching the kandev-plugin-bitbucket precedent.
 #   events: ["task.moved"] - near-real-time outbound write-back: when a linked
@@ -56,7 +63,7 @@ runtime:
 capabilities:
   state: true
   secrets: true
-  api_read: ["tasks"]
+  api_read: ["tasks", "workflows"]
   api_write: ["tasks"]
   events: ["task.moved"]
 
@@ -71,6 +78,7 @@ actions:
   - { key: "connection.disconnect", scope: "workspace", max_body_bytes: 8192 }
   - { key: "projects.list", scope: "workspace", max_body_bytes: 8192 }
   - { key: "projects.save", scope: "workspace", max_body_bytes: 32768 }
+  - { key: "workflows.list", scope: "workspace", max_body_bytes: 8192 }
   - { key: "fieldmapping.get", scope: "workspace", max_body_bytes: 8192 }
   - { key: "fieldmapping.save", scope: "workspace", max_body_bytes: 65536 }
   - { key: "syncoptions.save", scope: "workspace", max_body_bytes: 8192 }
