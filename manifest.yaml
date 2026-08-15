@@ -33,21 +33,32 @@ runtime:
 #              bookkeeping, watch dedup/throttle state (all scoped "workspace"
 #              or "task" per key, never global).
 #   secrets  - the workspace-composed, encrypted Redmine API key
-#              (redmine:<workspace_id>:api_key). No config_schema secret field
-#              is used: the API key is workspace-scoped, not plugin-install-scoped.
+#              (redmine.<workspace_id>.api_key — dots, not colons; the host's
+#              secret-key pattern rejects colons). No config_schema secret
+#              field is used: the API key is workspace-scoped, not
+#              plugin-install-scoped.
 #   api_read/api_write: ["tasks"] - reading/creating/updating tasks for watcher
 #              task creation and reading the linked task's current state during
 #              sync/write-back. Task linking itself is plugin-owned state
 #              (Tasks().Update has no metadata field to write a link onto — see
 #              docs/plans/redmine-plugin/task-06-task-linking-bidirectional-sync.md
 #              "Plan deviations"), matching the kandev-plugin-bitbucket precedent.
-# No `events` capability: sync and watcher polling run on the plugin's own
-# timers (spec "OnEvent — none required for v1"), not host event delivery.
+#   events: ["task.moved"] - near-real-time outbound write-back: when a linked
+#              task moves to a workflow step with a status mapping and
+#              autoStatusWriteback is enabled, OnEvent pushes the mapped
+#              status immediately rather than waiting for the next sync poll.
+#              This corrects task 01's original "no events capability"
+#              design decision — the spec's write-back scenario ("within one
+#              event-loop turn") is only achievable with it; the sync poll
+#              still runs as a reconciliation backstop since OnEvent delivery
+#              is best-effort (bounded in-memory queue, can be lost on
+#              backend restart per the plugin host's own delivery contract).
 capabilities:
   state: true
   secrets: true
   api_read: ["tasks"]
   api_write: ["tasks"]
+  events: ["task.moved"]
 
 # actions: the plugin's own native settings UI calls these via
 # host.api.invokeAction (never host.api.fetch, which cannot reach them). Every

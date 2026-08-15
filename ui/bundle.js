@@ -23,19 +23,65 @@
 //     tracked under this plugin's id, so the host bulk-unregisters everything
 //     when the plugin is disabled.
 //
-// This file starts as a bare skeleton; task 08
-// (docs/plans/redmine-plugin/task-08-settings-ui-native-registrations.md in
-// kdlbs/kandev) fills in registerIntegrationSettings (connection form,
-// project picker, field-mapping table, sync-option toggles, watcher
-// management) and registerTaskAction({placement:"link"}).
+// Task 08 (docs/plans/redmine-plugin/task-08-settings-ui-native-registrations.md
+// in kdlbs/kandev) adds registerIntegrationSettings (connection form, project
+// picker, field-mapping table, sync-option toggles, watcher management) and
+// the reference_sources composer-mention UI on top of this file.
 
+// ---------------------------------------------------------------------------
+// Task linking — registerTaskAction({placement:"link"}) opens the shared
+// host Link dialog. The plugin supplies only copy strings and an
+// onSubmit(reference, signal) callback; host.openTaskLinkDialog is a single
+// free-text input (an issue ID, "#123" shorthand, or issue URL), not a
+// search/picker UI. Resolving that reference to a real issue and persisting
+// the link happen entirely backend-side, via the link.set action
+// (server/actions_link.go's parseIssueReference + GetIssue call).
+// ---------------------------------------------------------------------------
+function makeLinkTaskAction(host) {
+  return {
+    id: "redmine-link",
+    label: "Redmine Issue",
+    placement: "link",
+    singleTaskOnly: true,
+    async run(context) {
+      host.openTaskLinkDialog({
+        title: "Link Redmine issue",
+        description: "Enter a Redmine issue ID, \"#123\", or an issue URL.",
+        inputLabel: "Issue",
+        placeholder: "#123 or https://redmine.example.com/issues/123",
+        emptyError: "Enter an issue ID or URL.",
+        failureMessage: "Could not link that Redmine issue. Check the ID and try again.",
+        successMessage: "Linked to Redmine issue.",
+        inputTestId: "redmine-link-input",
+        errorTestId: "redmine-link-error",
+        submitTestId: "redmine-link-submit",
+        async onSubmit(reference, signal) {
+          await host.api.invokeAction(
+            "link.set",
+            {
+              workspaceId: context.workspaceId,
+              taskId: context.taskId,
+              body: { reference },
+            },
+            { signal },
+          );
+        },
+      });
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Registration. Keep only what this plugin uses.
+// ---------------------------------------------------------------------------
 window.registerKandevPlugin("kandev-plugin-redmine", {
   initialize(registry, host) {
-    // Populated by task 08.
+    registry.registerTaskAction(makeLinkTaskAction(host));
   },
 
   destroy() {
-    // The host bulk-unregisters everything under this plugin's id; reset any
-    // module-level state here once task 08 introduces some.
+    // The host bulk-unregisters everything under this plugin's id; no
+    // module-level state to reset yet (task 08 introduces some for the
+    // settings page's live subscriptions).
   },
 });

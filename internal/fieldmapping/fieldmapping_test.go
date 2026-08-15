@@ -69,3 +69,29 @@ func TestDeriveCustomFieldsFromIssues_NoIssues_ReturnsEmpty(t *testing.T) {
 	fields := DeriveCustomFieldsFromIssues(nil)
 	require.Empty(t, fields)
 }
+
+func TestWorkflowStepForStatus_ResolvesInboundDirection(t *testing.T) {
+	m := Mapping{Statuses: []StatusMapping{
+		{RedmineStatusID: 1, WorkflowStepID: "step-backlog"},
+		{RedmineStatusID: 2, WorkflowStepID: "step-done"},
+	}}
+	step, ok := m.WorkflowStepForStatus(2)
+	require.True(t, ok)
+	require.Equal(t, "step-done", step)
+
+	_, ok = m.WorkflowStepForStatus(99)
+	require.False(t, ok)
+}
+
+func TestStatusForWorkflowStep_ResolvesOutboundDirection(t *testing.T) {
+	m := Mapping{Statuses: []StatusMapping{
+		{RedmineStatusID: 1, WorkflowStepID: "step-backlog"},
+		{RedmineStatusID: 2, WorkflowStepID: "step-done"},
+	}}
+	statusID, ok := m.StatusForWorkflowStep("step-done")
+	require.True(t, ok)
+	require.Equal(t, 2, statusID)
+
+	_, ok = m.StatusForWorkflowStep("step-unmapped")
+	require.False(t, ok)
+}

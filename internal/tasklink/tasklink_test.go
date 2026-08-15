@@ -1,0 +1,98 @@
+package tasklink
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestSetAndGet_RoundTrips(t *testing.T) {
+	svc := New(newFakeHost())
+
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "https://redmine.example/issues/42"))
+
+	link, found, err := svc.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, 42, link.IssueID)
+	require.Equal(t, "https://redmine.example/issues/42", link.IssueURL)
+	require.Equal(t, "ws-1", link.WorkspaceID)
+}
+
+func TestGet_NotLinked_ReturnsNotFound(t *testing.T) {
+	svc := New(newFakeHost())
+	_, found, err := svc.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestTaskIDForIssue_ResolvesReverseIndex(t *testing.T) {
+	svc := New(newFakeHost())
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "https://redmine.example/issues/42"))
+
+	taskID, found, err := svc.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "task-1", taskID)
+
+	_, found, err = svc.TaskIDForIssue(context.Background(), "ws-1", 999)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestTaskIDForIssue_DoesNotLeakAcrossWorkspaces(t *testing.T) {
+	svc := New(newFakeHost())
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+
+	_, found, err := svc.TaskIDForIssue(context.Background(), "ws-2", 42)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestUnset_RemovesLinkAndIndexEntry(t *testing.T) {
+	svc := New(newFakeHost())
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+
+	require.NoError(t, svc.Unset(context.Background(), "task-1"))
+
+	_, found, err := svc.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.False(t, found)
+
+	_, found, err = svc.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestUnset_NotLinked_IsNoOp(t *testing.T) {
+	svc := New(newFakeHost())
+	require.NoError(t, svc.Unset(context.Background(), "task-1"))
+}
+
+func TestSetEchoSuppression_RoundTrips(t *testing.T) {
+	svc := New(newFakeHost())
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+
+	statusID := 5
+	require.NoError(t, svc.RecordPushedStatus(context.Background(), "task-1", statusID))
+
+	link, found, err := svc.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NotNil(t, link.LastPushedStatusID)
+	require.Equal(t, 5, *link.LastPushedStatusID)
+}
+
+func TestRecordPushedTitleAndDescription_RoundTrips(t *testing.T) {
+	svc := New(newFakeHost())
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+
+	require.NoError(t, svc.RecordPushedTitleAndDescription(context.Background(), "task-1", "New title", "New description"))
+
+	link, found, err := svc.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "New title", link.LastPushedTitle)
+	require.NotEmpty(t, link.LastPushedDescriptionHash)
+}

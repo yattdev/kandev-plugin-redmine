@@ -116,6 +116,25 @@ func (s *Service) Get(ctx context.Context, workspaceID string) (*Record, bool, e
 	return recordFromMap(value), true, nil
 }
 
+// Client resolves an authenticated *redmineclient.Client for workspaceID
+// from its stored connection record and decrypted secret — the shared way
+// every other package (issues, projects, fieldmapping, sync, watch) reaches
+// Redmine for a given workspace.
+func (s *Service) Client(ctx context.Context, workspaceID string) (*redmineclient.Client, error) {
+	record, found, err := s.Get(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("connection: workspace %s has no connection", workspaceID)
+	}
+	apiKey, err := s.decryptedAPIKey(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	return redmineclient.New(record.BaseURL, apiKey, s.httpClient), nil
+}
+
 // Disconnect removes both the encrypted secret and the connection state for
 // workspaceID and stops it from being health-polled.
 func (s *Service) Disconnect(ctx context.Context, workspaceID string) error {

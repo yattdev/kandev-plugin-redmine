@@ -1,41 +1,114 @@
-// Package main tests. Exercises redminePlugin's inherited Plugin behavior
-// against a fake Host — no go-plugin subprocess needed. Grows alongside
-// plugin.go as later plan tasks add ActionHandler, EntityReferenceSearcher,
-// and PluginOwnedTaskTrees usage.
+// Package main tests. Exercises redminePlugin's Plugin/ActionHandler
+// behavior against a fake, in-memory Host — no go-plugin subprocess needed.
 package main
 
 import (
 	"context"
+	"encoding/json"
+	"sync"
 	"testing"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
 	"github.com/stretchr/testify/require"
 )
 
-// fakeHost is a minimal pluginsdk.Host test double. UnimplementedHostData
-// satisfies the data-reader accessors this test doesn't exercise; the core
-// state/secret/config/event methods have no unimplemented default and are
-// stubbed here directly.
+// fakeHost is an in-memory pluginsdk.Host test double: it actually stores
+// state/secrets and captures Tasks().Update calls, so integration tests
+// (actions_test.go) can assert on real round trips through the wired
+// services, not just that a call didn't panic.
 type fakeHost struct {
 	pluginsdk.UnimplementedHostData
+
+	mu      sync.Mutex
+	state   map[string]map[string]any
+	secrets map[string]string
+	updates []pluginsdk.UpdateTaskInput
 }
 
-func (*fakeHost) GetState(context.Context, string, string, string) (map[string]any, bool, error) {
-	return nil, false, nil
+func newFakeHost() *fakeHost {
+	return &fakeHost{state: make(map[string]map[string]any), secrets: make(map[string]string)}
 }
-func (*fakeHost) SetState(context.Context, string, string, string, map[string]any) error { return nil }
-func (*fakeHost) DeleteState(context.Context, string, string, string) error              { return nil }
-func (*fakeHost) ListState(context.Context, string, string) ([]pluginsdk.StateEntry, error) {
+
+func stateKeyOf(scope, scopeID, key string) string { return scope + "/" + scopeID + "/" + key }
+
+func (h *fakeHost) GetState(_ context.Context, scope, scopeID, key string) (map[string]any, bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	v, ok := h.state[stateKeyOf(scope, scopeID, key)]
+	return v, ok, nil
+}
+
+func (h *fakeHost) SetState(_ context.Context, scope, scopeID, key string, value map[string]any) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	data, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		panic(err)
+	}
+	h.state[stateKeyOf(scope, scopeID, key)] = out
+	return nil
+}
+
+func (h *fakeHost) DeleteState(_ context.Context, scope, scopeID, key string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.state, stateKeyOf(scope, scopeID, key))
+	return nil
+}
+
+func (h *fakeHost) ListState(context.Context, string, string) ([]pluginsdk.StateEntry, error) {
 	return nil, nil
 }
-func (*fakeHost) GetConfig(context.Context) (map[string]any, error)    { return map[string]any{}, nil }
-func (*fakeHost) RevealSecret(context.Context, string) (string, error) { return "", nil }
-func (*fakeHost) GetSecret(context.Context, string) (string, bool, error) {
-	return "", false, nil
+func (h *fakeHost) GetConfig(context.Context) (map[string]any, error) { return map[string]any{}, nil }
+func (h *fakeHost) RevealSecret(context.Context, string) (string, error) {
+	return "", nil
 }
-func (*fakeHost) SetSecret(context.Context, string, string) error         { return nil }
-func (*fakeHost) DeleteSecret(context.Context, string) error              { return nil }
-func (*fakeHost) EmitEvent(context.Context, string, map[string]any) error { return nil }
+
+func (h *fakeHost) GetSecret(_ context.Context, key string) (string, bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	v, ok := h.secrets[key]
+	return v, ok, nil
+}
+func (h *fakeHost) SetSecret(_ context.Context, key, value string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.secrets[key] = value
+	return nil
+}
+func (h *fakeHost) DeleteSecret(_ context.Context, key string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.secrets, key)
+	return nil
+}
+func (h *fakeHost) EmitEvent(context.Context, string, map[string]any) error { return nil }
+
+func (h *fakeHost) Tasks() pluginsdk.TaskReader {
+	return fakeTaskReader{TaskReader: pluginsdk.UnimplementedHostData{}.Tasks(), host: h}
+}
+
+func (h *fakeHost) updateCalls() []pluginsdk.UpdateTaskInput {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]pluginsdk.UpdateTaskInput(nil), h.updates...)
+}
+
+type fakeTaskReader struct {
+	pluginsdk.TaskReader
+	host *fakeHost
+}
+
+func (r fakeTaskReader) Update(_ context.Context, in pluginsdk.UpdateTaskInput) (*pluginsdk.Task, error) {
+	r.host.mu.Lock()
+	r.host.updates = append(r.host.updates, in)
+	r.host.mu.Unlock()
+	return &pluginsdk.Task{ID: in.ID}, nil
+}
 
 var _ pluginsdk.Host = (*fakeHost)(nil)
 
@@ -43,14 +116,21 @@ func TestRedminePlugin_HostRoundTrip(t *testing.T) {
 	p := &redminePlugin{}
 	require.Nil(t, p.Host())
 
-	host := &fakeHost{}
+	host := newFakeHost()
 	p.SetHost(host)
 	require.Same(t, pluginsdk.Host(host), p.Host())
 }
 
-func TestRedminePlugin_OnEvent_NoOpWithoutOverride(t *testing.T) {
+func TestRedminePlugin_OnEvent_IgnoresNonTaskMovedEvents(t *testing.T) {
 	p := &redminePlugin{}
+	p.SetHost(newFakeHost())
 	err := p.OnEvent(context.Background(), &pluginsdk.Event{EventID: "e1", EventType: "task.created"})
+	require.NoError(t, err)
+}
+
+func TestRedminePlugin_OnEvent_BeforeHostInjected_IsNoOp(t *testing.T) {
+	p := &redminePlugin{}
+	err := p.OnEvent(context.Background(), &pluginsdk.Event{EventID: "e1", EventType: "task.moved", Payload: map[string]any{"task_id": "t1", "to_step_id": "step-done"}})
 	require.NoError(t, err)
 }
 

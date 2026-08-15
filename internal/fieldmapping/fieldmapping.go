@@ -53,6 +53,28 @@ type Mapping struct {
 	Priorities []PriorityMapping `json:"priorities"`
 }
 
+// WorkflowStepForStatus resolves the inbound direction: a Redmine status ID
+// to the Kandev workflow step it maps to.
+func (m Mapping) WorkflowStepForStatus(redmineStatusID int) (string, bool) {
+	for _, s := range m.Statuses {
+		if s.RedmineStatusID == redmineStatusID {
+			return s.WorkflowStepID, s.WorkflowStepID != ""
+		}
+	}
+	return "", false
+}
+
+// StatusForWorkflowStep resolves the outbound (write-back) direction: a
+// Kandev workflow step to the Redmine status ID it maps to.
+func (m Mapping) StatusForWorkflowStep(workflowStepID string) (int, bool) {
+	for _, s := range m.Statuses {
+		if s.WorkflowStepID == workflowStepID {
+			return s.RedmineStatusID, true
+		}
+	}
+	return 0, false
+}
+
 const (
 	stateScope = "workspace"
 	stateKey   = "field_mapping"

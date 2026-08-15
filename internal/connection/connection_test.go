@@ -161,6 +161,28 @@ func TestDisconnect_RemovesSecretAndState(t *testing.T) {
 	require.NotContains(t, ids, "ws-1")
 }
 
+func TestClient_ResolvesAuthenticatedClientFromStoredConnection(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	srv := validRedmineServer(t)
+
+	_, err := svc.Connect(context.Background(), "ws-1", srv.URL, "good-key")
+	require.NoError(t, err)
+
+	client, err := svc.Client(context.Background(), "ws-1")
+	require.NoError(t, err)
+	user, err := client.ValidateCredentials(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, user.ID)
+}
+
+func TestClient_NoConnection_Errors(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	_, err := svc.Client(context.Background(), "ws-1")
+	require.Error(t, err)
+}
+
 func TestTwoWorkspaces_CannotReadOrAffectEachOthersSecretOrState(t *testing.T) {
 	host := newFakeHost()
 	svc := New(host)
