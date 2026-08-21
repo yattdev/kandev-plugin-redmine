@@ -21,6 +21,8 @@ import (
 	"kandev-plugin-redmine/internal/tasklink"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // cursorOverlap subtracts one second from the persisted cursor before using
@@ -187,6 +189,11 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 		return nil
 	}
 	if _, err := s.host.Tasks().Update(ctx, update); err != nil {
+		if status.Code(err) == codes.NotFound {
+			// Event delivery is best-effort. A missed task.deleted must not
+			// pin this workspace's cursor on a stale task link forever.
+			return s.tasklink.Unset(ctx, taskID)
+		}
 		return fmt.Errorf("sync: applying inbound update to task %s: %w", taskID, err)
 	}
 	if statusEcho || titleEcho || descriptionEcho {

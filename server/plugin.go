@@ -216,6 +216,13 @@ func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
 		}
 		return p.clearWorkspace(ctx, workspaceID)
 	}
+	if e.EventType == "task.deleted" {
+		taskID, _ := e.Payload["task_id"].(string)
+		if taskID == "" {
+			return nil
+		}
+		return p.tasklinkSvc.Unset(ctx, taskID)
+	}
 	if e.EventType != "task.moved" {
 		return nil
 	}

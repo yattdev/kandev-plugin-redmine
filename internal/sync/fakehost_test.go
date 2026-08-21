@@ -14,9 +14,10 @@ import (
 type fakeHost struct {
 	pluginsdk.UnimplementedHostData
 
-	mu      sync.Mutex
-	state   map[string]map[string]any
-	updates []pluginsdk.UpdateTaskInput
+	mu        sync.Mutex
+	state     map[string]map[string]any
+	updates   []pluginsdk.UpdateTaskInput
+	updateErr error
 }
 
 func newFakeHost() *fakeHost {
@@ -87,7 +88,11 @@ type fakeTaskReader struct {
 func (r fakeTaskReader) Update(_ context.Context, in pluginsdk.UpdateTaskInput) (*pluginsdk.Task, error) {
 	r.host.mu.Lock()
 	r.host.updates = append(r.host.updates, in)
+	err := r.host.updateErr
 	r.host.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	return &pluginsdk.Task{ID: in.ID}, nil
 }
 

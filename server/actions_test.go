@@ -336,3 +336,14 @@ func TestOnEvent_WorkspaceDeleted_CleansPluginStateAfterTaskCascade(t *testing.T
 	require.NoError(t, err)
 	require.False(t, found)
 }
+
+func TestOnEvent_TaskDeletedIdempotentlyRemovesLink(t *testing.T) {
+	p, _ := newTestPlugin()
+	require.NoError(t, p.tasklinkSvc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	event := &pluginsdk.Event{EventID: "deleted", EventType: "task.deleted", Payload: map[string]any{"task_id": "task-1"}}
+	require.NoError(t, p.OnEvent(context.Background(), event))
+	require.NoError(t, p.OnEvent(context.Background(), event))
+	_, found, err := p.tasklinkSvc.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.False(t, found)
+}

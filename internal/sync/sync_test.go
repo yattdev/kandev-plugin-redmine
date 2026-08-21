@@ -14,6 +14,8 @@ import (
 	"kandev-plugin-redmine/internal/tasklink"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func testMapping() fieldmapping.Mapping {
@@ -66,6 +68,25 @@ func TestPollInbound_UnlinkedIssue_DoesNotTouchAnyTask(t *testing.T) {
 	err := svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{})
 	require.NoError(t, err)
 	require.Empty(t, host.updateCalls())
+}
+
+func TestPollInbound_NotFoundTaskSelfHealsStaleLink(t *testing.T) {
+	host := newFakeHost()
+	host.updateErr = status.Error(codes.NotFound, "task deleted")
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"s","status":{"id":2},"updated_on":"2026-01-01T00:00:00Z"}],"total_count":1}`))
+	}))
+	defer srv.Close()
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
+	_, found, err := tl.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.False(t, found)
+	_, found, err = tl.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.False(t, found)
 }
 
 func TestPollInbound_TitleDescriptionSync_OnlyWhenEnabled(t *testing.T) {
