@@ -106,6 +106,12 @@ func TestHandleAction_IssueUploadAndCreateExposeFullWriteContract(t *testing.T) 
 		switch r.URL.Path {
 		case "/users/current.json":
 			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case "/trackers.json":
+			_, _ = w.Write([]byte(`{"trackers":[{"id":2,"name":"Bug"}]}`))
+		case "/issue_statuses.json":
+			_, _ = w.Write([]byte(`{"issue_statuses":[{"id":3,"name":"Open"}]}`))
+		case "/enumerations/issue_priorities.json":
+			_, _ = w.Write([]byte(`{"issue_priorities":[{"id":4,"name":"Normal"}]}`))
 		case "/uploads.json":
 			uploadFilename = r.URL.Query().Get("filename")
 			uploadContentType = r.Header.Get("Content-Type")
@@ -122,6 +128,7 @@ func TestHandleAction_IssueUploadAndCreateExposeFullWriteContract(t *testing.T) 
 	defer srv.Close()
 	p, _ := newTestPlugin()
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
 	upload := handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "note.txt", "content_type": "text/plain", "content_base64": base64.StdEncoding.EncodeToString([]byte("hello"))})
 	require.Equal(t, "upload-token", upload["token"])
 	require.Equal(t, "note.txt", uploadFilename)
@@ -153,9 +160,19 @@ func TestHandleAction_IssueUpdateValidatesIDAndSendsFullPayload(t *testing.T) {
 		case "/users/current.json":
 			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
 		case "/issues/23.json":
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`{"issue":{"id":23,"project":{"id":1}}}`))
+				return
+			}
 			require.Equal(t, http.MethodPut, r.Method)
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&updateBody))
 			w.WriteHeader(http.StatusNoContent)
+		case "/trackers.json":
+			_, _ = w.Write([]byte(`{"trackers":[{"id":2,"name":"Bug"}]}`))
+		case "/issue_statuses.json":
+			_, _ = w.Write([]byte(`{"issue_statuses":[{"id":3,"name":"Open"}]}`))
+		case "/enumerations/issue_priorities.json":
+			_, _ = w.Write([]byte(`{"issue_priorities":[{"id":4,"name":"Normal"}]}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -163,6 +180,7 @@ func TestHandleAction_IssueUpdateValidatesIDAndSendsFullPayload(t *testing.T) {
 	defer srv.Close()
 	p, _ := newTestPlugin()
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
 
 	invalid := handle(t, p, "issues.update", "ws-1", "", map[string]any{"subject": "missing ID"})
 	require.Contains(t, invalid["error"], "issue_id")
@@ -175,6 +193,56 @@ func TestHandleAction_IssueUpdateValidatesIDAndSendsFullPayload(t *testing.T) {
 	uploads, ok := issue["uploads"].([]any)
 	require.True(t, ok)
 	require.Equal(t, "text/plain", uploads[0].(map[string]any)["content_type"])
+}
+
+func TestHandleAction_IssueWriteRejectsUntrustedBoundaries(t *testing.T) {
+	p, _ := newTestPlugin()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/current.json":
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case "/issues/23.json":
+			_, _ = w.Write([]byte(`{"issue":{"id":23,"project":{"id":2}}}`))
+		case "/issues/24.json":
+			_, _ = w.Write([]byte(`{"issue":{"id":24,"project":{"id":1}}}`))
+		case "/trackers.json":
+			_, _ = w.Write([]byte(`{"trackers":[{"id":2,"name":"Bug"}]}`))
+		case "/issue_statuses.json":
+			_, _ = w.Write([]byte(`{"issue_statuses":[{"id":3,"name":"Open"}]}`))
+		case "/enumerations/issue_priorities.json":
+			_, _ = w.Write([]byte(`{"issue_priorities":[{"id":4,"name":"Normal"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
+
+	for _, body := range []map[string]any{
+		{"project_id": 1, "subject": "   "},
+		{"project_id": 0, "subject": "new"},
+		{"project_id": 2, "subject": "new"},
+		{"project_id": 1, "tracker_id": 9, "subject": "new"},
+		{"project_id": 1, "status_id": 9, "subject": "new"},
+		{"project_id": 1, "priority_id": 9, "subject": "new"},
+		{"project_id": 1, "subject": "new", "custom_fields": []any{map[string]any{"id": -1}}},
+		{"project_id": 1, "subject": "new", "custom_fields": []any{map[string]any{"id": 1}, map[string]any{"id": 1}}},
+		{"project_id": 1, "subject": "new", "uploads": []any{map[string]any{"token": "", "filename": "x", "content_type": "text/plain"}}},
+		{"project_id": 1, "subject": "new", "uploads": []any{map[string]any{"token": "t", "filename": "x", "content_type": "not a media type;"}}},
+	} {
+		require.NotEmpty(t, handle(t, p, "issues.create", "ws-1", "", body)["error"])
+	}
+	for _, body := range []map[string]any{
+		{"issue_id": 0, "subject": "x"},
+		{"issue_id": 23},
+		{"issue_id": 23, "status_id": 3}, // existing issue belongs to project 2.
+		{"issue_id": 24, "status_id": 0},
+		{"issue_id": 24, "priority_id": 9},
+		{"issue_id": 24, "custom_fields": []any{map[string]any{"id": 2}, map[string]any{"id": 2}}},
+	} {
+		require.NotEmpty(t, handle(t, p, "issues.update", "ws-1", "", body)["error"])
+	}
 }
 
 func TestHandleAction_IssueUploadRejectsInvalidInput(t *testing.T) {

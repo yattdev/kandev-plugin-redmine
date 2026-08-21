@@ -180,6 +180,20 @@ type IssueWrite struct {
 	Uploads []Upload
 }
 
+// IssueUpdate preserves JSON-field presence for partial issue updates. A nil
+// pointer means leave the Redmine value untouched; a non-nil pointer may
+// deliberately carry an empty string (for example to clear description).
+type IssueUpdate struct {
+	ProjectID    *int
+	TrackerID    *int
+	StatusID     *int
+	PriorityID   *int
+	Subject      *string
+	Description  *string
+	CustomFields *[]CustomFieldValue
+	Uploads      *[]Upload
+}
+
 type uploadRef struct {
 	Token       string `json:"token"`
 	Filename    string `json:"filename"`
@@ -207,6 +221,21 @@ type issueWritePayload struct {
 	Issue issueWriteBody `json:"issue"`
 }
 
+type issueUpdateBody struct {
+	ProjectID    *int                `json:"project_id,omitempty"`
+	TrackerID    *int                `json:"tracker_id,omitempty"`
+	StatusID     *int                `json:"status_id,omitempty"`
+	PriorityID   *int                `json:"priority_id,omitempty"`
+	Subject      *string             `json:"subject,omitempty"`
+	Description  *string             `json:"description,omitempty"`
+	CustomFields *[]CustomFieldValue `json:"custom_fields,omitempty"`
+	Uploads      *[]uploadRef        `json:"uploads,omitempty"`
+}
+
+type issueUpdatePayload struct {
+	Issue issueUpdateBody `json:"issue"`
+}
+
 func (w IssueWrite) toBody() issueWriteBody {
 	uploads := make([]uploadRef, len(w.Uploads))
 	for i, upload := range w.Uploads {
@@ -222,6 +251,22 @@ func (w IssueWrite) toBody() issueWriteBody {
 		CustomFields: w.CustomFields,
 		Uploads:      uploads,
 	}
+}
+
+func (w IssueUpdate) toBody() issueUpdateBody {
+	body := issueUpdateBody{
+		ProjectID: w.ProjectID, TrackerID: w.TrackerID, StatusID: w.StatusID,
+		PriorityID: w.PriorityID, Subject: w.Subject, Description: w.Description,
+		CustomFields: w.CustomFields,
+	}
+	if w.Uploads != nil {
+		uploads := make([]uploadRef, len(*w.Uploads))
+		for i, upload := range *w.Uploads {
+			uploads[i] = uploadRef{Token: upload.Token, Filename: upload.Filename, ContentType: upload.ContentType}
+		}
+		body.Uploads = &uploads
+	}
+	return body
 }
 
 // CreateIssue creates a new issue via POST /issues.json, returning its id
@@ -240,6 +285,13 @@ func (s *Service) CreateIssue(ctx context.Context, write IssueWrite) (*Issue, er
 // decoded.
 func (s *Service) UpdateIssue(ctx context.Context, id int, write IssueWrite) error {
 	return s.client.PutJSON(ctx, fmt.Sprintf("/issues/%d.json", id), issueWritePayload{Issue: write.toBody()}, nil)
+}
+
+// UpdateIssueFields performs a partial update while retaining the caller's
+// presence information. In particular, Description: ptr("") serializes an
+// explicit clear whereas Description: nil omits description entirely.
+func (s *Service) UpdateIssueFields(ctx context.Context, id int, update IssueUpdate) error {
+	return s.client.PutJSON(ctx, fmt.Sprintf("/issues/%d.json", id), issueUpdatePayload{Issue: update.toBody()}, nil)
 }
 
 type uploadEnvelope struct {

@@ -132,6 +132,28 @@ func TestUpdateIssue_SendsFullFieldSet(t *testing.T) {
 	require.Equal(t, "Updated subject", issueBody["subject"])
 }
 
+func TestUpdateIssueFields_PreservesOmittedAndExplicitEmptyDescription(t *testing.T) {
+	var bodies []map[string]any
+	svc := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		bodies = append(bodies, body)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	status := 5
+	require.NoError(t, svc.UpdateIssueFields(context.Background(), 42, issues.IssueUpdate{StatusID: &status}))
+	empty := ""
+	require.NoError(t, svc.UpdateIssueFields(context.Background(), 42, issues.IssueUpdate{Description: &empty}))
+
+	first := bodies[0]["issue"].(map[string]any)
+	require.EqualValues(t, 5, first["status_id"])
+	_, found := first["description"]
+	require.False(t, found, "an omitted description must not clear Redmine")
+	second := bodies[1]["issue"].(map[string]any)
+	require.Equal(t, "", second["description"], "an explicit empty description clears Redmine")
+}
+
 func TestUploadAttachment_ThenCreateIssue_IncludesTokenInUploadsArray(t *testing.T) {
 	var gotUploadContentType string
 	var gotUploadBody []byte
