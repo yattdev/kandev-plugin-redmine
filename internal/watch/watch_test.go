@@ -162,3 +162,28 @@ func TestFilter_TrackerAndStatusRestrictMatches(t *testing.T) {
 		require.Contains(t, task.Title, "right tracker")
 	}
 }
+
+func TestPoll_PaginatesBeyondOneHundredIssues(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+
+	issuesSvc := newIssuesService(t, func(res http.ResponseWriter, req *http.Request) {
+		offset := req.URL.Query().Get("offset")
+		start, end := 0, 100
+		if offset == "100" {
+			start, end = 100, 101
+		}
+		_, _ = fmt.Fprint(res, `{"issues":[`)
+		for i := start; i < end; i++ {
+			if i > start {
+				_, _ = fmt.Fprint(res, ",")
+			}
+			_, _ = fmt.Fprintf(res, `{"id":%d,"subject":"issue %d"}`, i+1, i+1)
+		}
+		_, _ = fmt.Fprint(res, `],"total_count":101}`)
+	})
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Len(t, host.tasks, 101)
+}

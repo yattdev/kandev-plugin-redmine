@@ -112,3 +112,29 @@ func TestDefaultClient_RefusesCrossOriginRedirectWithoutFollowingIt(t *testing.T
 	require.Error(t, err)
 	require.False(t, targetHit)
 }
+
+func TestGetRetriesTransientFailureButPostDoesNotDuplicate(t *testing.T) {
+	getCalls, postCalls := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getCalls++
+			if getCalls < 3 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case http.MethodPost:
+			postCalls++
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer srv.Close()
+	c := redmineclient.New(srv.URL, "key", srv.Client())
+	_, err := c.ValidateCredentials(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 3, getCalls)
+	err = c.PostJSON(context.Background(), "/issues.json", map[string]string{"subject": "one"}, nil)
+	require.Error(t, err)
+	require.Equal(t, 1, postCalls)
+}

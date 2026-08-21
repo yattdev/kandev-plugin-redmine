@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,6 +26,11 @@ type Client struct {
 }
 
 const defaultHTTPTimeout = 15 * time.Second
+
+const (
+	maxRetryAttempts = 3
+	retryBaseDelay   = 50 * time.Millisecond
+)
 
 // NormalizeBaseURL accepts only an HTTP(S) origin or an HTTP(S) origin with a
 // Redmine subpath. Credentials, queries and fragments are never meaningful
@@ -113,22 +119,77 @@ func (c *Client) newRequest(ctx context.Context, method, path string, query map[
 // into a typed *APIError. On success it decodes the JSON body into out (skip
 // decoding by passing a nil out, e.g. for 204 responses).
 func (c *Client) do(req *http.Request, out any) error {
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return &APIError{Kind: ErrKindUnreachable, Message: fmt.Sprintf("redmineclient: %s %s: %v", req.Method, req.URL.Path, err)}
-	}
-	defer func() { _ = resp.Body.Close() }()
+	for attempt := 0; ; attempt++ {
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			if !canRetry(req) || attempt+1 >= maxRetryAttempts {
+				return &APIError{Kind: ErrKindUnreachable, Message: fmt.Sprintf("redmineclient: %s %s: %v", req.Method, req.URL.Path, err)}
+			}
+			if err := waitForRetry(req.Context(), retryDelay(nil, attempt)); err != nil {
+				return &APIError{Kind: ErrKindUnreachable, Message: fmt.Sprintf("redmineclient: retry cancelled: %v", err)}
+			}
+			resetRequestBody(req)
+			continue
+		}
+		if retryableStatus(resp.StatusCode) && canRetry(req) && attempt+1 < maxRetryAttempts {
+			delay := retryDelay(resp, attempt)
+			_ = resp.Body.Close()
+			if err := waitForRetry(req.Context(), delay); err != nil {
+				return &APIError{Kind: ErrKindUnexpected, StatusCode: resp.StatusCode, Message: fmt.Sprintf("redmineclient: retry cancelled: %v", err)}
+			}
+			resetRequestBody(req)
+			continue
+		}
+		defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return classifyErrorStatus(resp.StatusCode, req.URL.Path)
-	}
-	if out == nil {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return classifyErrorStatus(resp.StatusCode, req.URL.Path)
+		}
+		if out == nil {
+			return nil
+		}
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			return &APIError{Kind: ErrKindUnexpected, StatusCode: resp.StatusCode, Message: fmt.Sprintf("redmineclient: decoding response from %s: %v", req.URL.Path, err)}
+		}
 		return nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return &APIError{Kind: ErrKindUnexpected, StatusCode: resp.StatusCode, Message: fmt.Sprintf("redmineclient: decoding response from %s: %v", req.URL.Path, err)}
+}
+
+func canRetry(req *http.Request) bool {
+	return req.Method == http.MethodGet || (req.Method == http.MethodPut && req.GetBody != nil)
+}
+
+func resetRequestBody(req *http.Request) {
+	if req.GetBody == nil {
+		return
 	}
-	return nil
+	body, err := req.GetBody()
+	if err == nil {
+		req.Body = body
+	}
+}
+
+func retryableStatus(status int) bool { return status == http.StatusTooManyRequests || status >= 500 }
+
+func retryDelay(resp *http.Response, attempt int) time.Duration {
+	if resp != nil {
+		if seconds, err := time.ParseDuration(resp.Header.Get("Retry-After") + "s"); err == nil && seconds > 0 {
+			return seconds
+		}
+	}
+	delay := retryBaseDelay << attempt
+	return delay/2 + time.Duration(rand.Int63n(int64(delay/2)+1)) //nolint:gosec // retry jitter is not security-sensitive
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func classifyErrorStatus(statusCode int, path string) *APIError {

@@ -2,6 +2,7 @@ package connection
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"sync"
 	"time"
@@ -131,7 +132,10 @@ func (p *HealthPoller) probeOne(ctx context.Context, workspaceID string) {
 
 	client := redmineclient.New(record.BaseURL, apiKey, p.svc.httpClient)
 	if _, err := client.ValidateCredentials(ctx); err != nil {
-		_ = p.svc.markDegraded(ctx, workspaceID, record, err.Error())
+		var apiErr *redmineclient.APIError
+		if errors.As(err, &apiErr) && (apiErr.Kind == redmineclient.ErrKindInvalidCredentials || apiErr.Kind == redmineclient.ErrKindAPIDisabled) {
+			_ = p.svc.markDegraded(ctx, workspaceID, record, err.Error())
+		}
 		return
 	}
 	_ = p.svc.markHealthy(ctx, workspaceID, record)

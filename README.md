@@ -192,7 +192,7 @@ Either through the UI (**Settings > Plugins > Install plugin**, URL or file
 upload), or directly:
 
 ```sh
-curl -F package=@kandev-plugin-redmine-0.1.0.tar.gz \
+curl -F package=@kandev-plugin-redmine-0.2.0.tar.gz \
   http://localhost:<kandev-port>/api/plugins/install
 ```
 
@@ -219,8 +219,8 @@ install pipeline expects:
 
 ```sh
 # bump VERSION in Makefile + version in manifest.yaml first, then:
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The workflows check out the kandev monorepo as a sibling so the local Go SDK
