@@ -78,6 +78,9 @@ func (p *redminePlugin) handleIssueUpload(ctx context.Context, req *pluginsdk.Pl
 	if strings.TrimSpace(body.Filename) == "" {
 		return classifiedErrorResponse(fmt.Errorf("redmine: attachment filename is required"))
 	}
+	if body.ContentBase64 == "" {
+		return classifiedErrorResponse(fmt.Errorf("redmine: attachment content_base64 is required"))
+	}
 	if base64.StdEncoding.DecodedLen(len(body.ContentBase64)) > maxAttachmentBytes {
 		return classifiedErrorResponse(fmt.Errorf("redmine: attachment exceeds %d bytes", maxAttachmentBytes))
 	}

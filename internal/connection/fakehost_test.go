@@ -3,6 +3,7 @@ package connection
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
@@ -17,9 +18,10 @@ import (
 type fakeHost struct {
 	pluginsdk.UnimplementedHostData
 
-	mu      sync.Mutex
-	state   map[string]map[string]any
-	secrets map[string]string
+	mu           sync.Mutex
+	state        map[string]map[string]any
+	secrets      map[string]string
+	setSecretErr error
 }
 
 func newFakeHost() *fakeHost {
@@ -71,8 +73,17 @@ func (h *fakeHost) GetSecret(_ context.Context, key string) (string, bool, error
 func (h *fakeHost) SetSecret(_ context.Context, key, value string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.setSecretErr != nil {
+		return h.setSecretErr
+	}
 	h.secrets[key] = value
 	return nil
+}
+
+func (h *fakeHost) failSecretWrites() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.setSecretErr = errors.New("temporary secret-store failure")
 }
 
 func (h *fakeHost) DeleteSecret(_ context.Context, key string) error {

@@ -234,3 +234,18 @@ func TestClient_LegacyEncryptedSecretMigratesToHostManagedValue(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, "good-key", stored)
 }
+
+func TestClient_LegacySecretStillWorksWhenBestEffortRewriteFails(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	srv := validRedmineServer(t)
+	legacy, err := secretcrypto.Encrypt("ws-1", "good-key")
+	require.NoError(t, err)
+	require.NoError(t, host.SetSecret(context.Background(), secretKey("ws-1"), legacy))
+	require.NoError(t, svc.saveRecord(context.Background(), "ws-1", &Record{BaseURL: srv.URL, State: StateConnected}))
+	host.failSecretWrites()
+	client, err := svc.Client(context.Background(), "ws-1")
+	require.NoError(t, err)
+	_, err = client.ValidateCredentials(context.Background())
+	require.NoError(t, err)
+}

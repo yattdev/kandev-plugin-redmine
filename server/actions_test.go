@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"kandev-plugin-redmine/internal/fieldmapping"
+	redminesync "kandev-plugin-redmine/internal/sync"
+	"kandev-plugin-redmine/internal/watch"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
 	"github.com/stretchr/testify/require"
@@ -122,7 +124,9 @@ func TestHandleAction_IssueUploadAndCreateExposeFullWriteContract(t *testing.T) 
 	require.Equal(t, "text/plain", uploadContentType)
 	require.Equal(t, "hello", string(uploadBody))
 
-	created := handle(t, p, "issues.create", "ws-1", "", map[string]any{"project_id": 1, "tracker_id": 2, "status_id": 3, "priority_id": 4, "subject": "Created", "description": "Body", "custom_fields": []any{map[string]any{"id": 9, "name": "Tier", "value": "Gold"}}, "uploads": []any{map[string]any{"token": upload["token"], "filename": "note.txt", "content_type": "text/plain"}}})
+	// Feed the upload action response verbatim into create, as a UI caller
+	// does. This proves snake_case content_type decodes into issues.Upload.
+	created := handle(t, p, "issues.create", "ws-1", "", map[string]any{"project_id": 1, "tracker_id": 2, "status_id": 3, "priority_id": 4, "subject": "Created", "description": "Body", "custom_fields": []any{map[string]any{"id": 9, "name": "Tier", "value": "Gold"}}, "uploads": []any{upload}})
 	require.EqualValues(t, 77, created["id"])
 	issue, ok := createBody["issue"].(map[string]any)
 	require.True(t, ok)
@@ -137,6 +141,10 @@ func TestHandleAction_IssueUploadRejectsInvalidInput(t *testing.T) {
 	require.Contains(t, out["error"], "filename")
 	out = handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "x", "content_base64": "not-base64"})
 	require.Contains(t, out["error"], "invalid")
+	out = handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "x", "content_base64": ""})
+	require.Contains(t, out["error"], "required")
+	out = handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "x", "content_base64": base64.StdEncoding.EncodeToString(make([]byte, maxAttachmentBytes+1))})
+	require.Contains(t, out["error"], "exceeds")
 }
 
 func TestHandleAction_ProjectsSaveThenList_PersistsSelection(t *testing.T) {
@@ -230,4 +238,27 @@ func TestOnEvent_TaskMoved_AutoWritebackEnabled_PushesStatus(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.EqualValues(t, 5, pushedStatus)
+}
+
+func TestOnEvent_WorkspaceDeleted_CleansPluginStateAfterTaskCascade(t *testing.T) {
+	p, _ := newTestPlugin()
+	srv := redmineFixtureServer(t, nil)
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
+	require.NoError(t, p.fieldmappingSvc.Save(context.Background(), "ws-1", fieldmapping.Mapping{}))
+	require.NoError(t, p.syncSvc.SaveOptions(context.Background(), "ws-1", redminesync.Options{AutoStatusWriteback: true}))
+	_, err := p.watchSvc.CreateWatch(context.Background(), watch.Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	require.NoError(t, p.tasklinkSvc.Set(context.Background(), "task-already-cascaded", "ws-1", 42, "url"))
+
+	require.NoError(t, p.OnEvent(context.Background(), &pluginsdk.Event{EventID: "deleted", EventType: "workspace.deleted", WorkspaceID: "ws-1"}))
+	_, found, err := p.connectionSvc.Get(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.False(t, found)
+	watches, err := p.watchSvc.ListWatches(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.Empty(t, watches)
+	_, found, err = p.tasklinkSvc.Get(context.Background(), "task-already-cascaded")
+	require.NoError(t, err)
+	require.False(t, found)
 }

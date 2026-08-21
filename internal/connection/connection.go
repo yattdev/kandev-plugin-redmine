@@ -262,9 +262,9 @@ func (s *Service) decryptedAPIKey(ctx context.Context, workspaceID string) (stri
 	// v0.1 stored a plugin-encrypted value. Read it once for upgrade
 	// compatibility, then rewrite plaintext through the host secret store.
 	if legacy, legacyErr := secretcrypto.Decrypt(workspaceID, encrypted); legacyErr == nil {
-		if err := s.host.SetSecret(ctx, secretKey(workspaceID), legacy); err != nil {
-			return "", fmt.Errorf("connection: migrating legacy secret: %w", err)
-		}
+		// Migration is best-effort: an existing connection must keep working if
+		// a transient host write fails. The next read retries the rewrite.
+		_ = s.host.SetSecret(ctx, secretKey(workspaceID), legacy)
 		return legacy, nil
 	}
 	return encrypted, nil

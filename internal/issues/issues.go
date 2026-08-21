@@ -187,9 +187,9 @@ type uploadRef struct {
 }
 
 type Upload struct {
-	Token       string
-	Filename    string
-	ContentType string
+	Token       string `json:"token"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
 type issueWriteBody struct {
