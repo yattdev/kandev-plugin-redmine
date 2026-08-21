@@ -300,7 +300,7 @@ func (p *redminePlugin) resolveCustomFields(ctx context.Context, client *redmine
 		return out, false, nil
 	}
 	apiErr, ok := asAPIError(err)
-	if !ok || apiErr.Kind != redmineclient.ErrKindAPIDisabled {
+	if !ok || apiErr.Kind != redmineclient.ErrKindPermissionDenied {
 		return nil, false, err
 	}
 

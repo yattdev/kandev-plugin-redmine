@@ -59,6 +59,17 @@ func TestValidateCredentials_APIDisabled_ReturnsDistinctError(t *testing.T) {
 	require.Equal(t, redmineclient.ErrKindAPIDisabled, apiErr.Kind)
 }
 
+func TestEndpointForbidden_IsPermissionDeniedNotAPIDisabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusForbidden) }))
+	defer srv.Close()
+	c := redmineclient.New(srv.URL, "key", srv.Client())
+	var out map[string]any
+	err := c.GetJSON(context.Background(), "/custom_fields.json", nil, &out)
+	var apiErr *redmineclient.APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, redmineclient.ErrKindPermissionDenied, apiErr.Kind)
+}
+
 func TestValidateCredentials_Unreachable_ReturnsDistinctError(t *testing.T) {
 	// A closed listener: connection refused, never reaches the fake server.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))

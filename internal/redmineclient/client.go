@@ -84,6 +84,7 @@ type ErrorKind string
 const (
 	ErrKindInvalidCredentials ErrorKind = "invalid_credentials"
 	ErrKindAPIDisabled        ErrorKind = "api_disabled"
+	ErrKindPermissionDenied   ErrorKind = "permission_denied"
 	ErrKindUnreachable        ErrorKind = "unreachable"
 	ErrKindUnexpected         ErrorKind = "unexpected"
 )
@@ -202,6 +203,9 @@ func classifyErrorStatus(statusCode int, path string) *APIError {
 	case http.StatusUnauthorized:
 		return &APIError{Kind: ErrKindInvalidCredentials, StatusCode: statusCode, Message: "redmineclient: Redmine rejected the API key"}
 	case http.StatusForbidden:
+		if path != "/users/current.json" {
+			return &APIError{Kind: ErrKindPermissionDenied, StatusCode: statusCode, Message: fmt.Sprintf("redmineclient: permission denied for %s", path)}
+		}
 		return &APIError{Kind: ErrKindAPIDisabled, StatusCode: statusCode, Message: "redmineclient: Redmine's REST API is disabled (Administration > Settings > API)"}
 	default:
 		return &APIError{Kind: ErrKindUnexpected, StatusCode: statusCode, Message: fmt.Sprintf("redmineclient: unexpected status %d from %s", statusCode, path)}

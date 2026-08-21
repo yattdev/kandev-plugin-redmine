@@ -109,7 +109,7 @@ func (c *Client) ListIssuePriorities(ctx context.Context) ([]Priority, error) {
 
 // CustomFieldDef is one entry from /custom_fields.json — admin-only on
 // Redmine; a non-admin key gets a 403 (surfaced here as *APIError with Kind
-// ErrKindAPIDisabled, same as the connection-level "API disabled" case,
+// ErrKindPermissionDenied while /users/current.json still authenticates,
 // since Redmine returns the same status for both — internal/fieldmapping
 // distinguishes them by which endpoint it came from and falls back to
 // deriving fields from recently fetched issues rather than treating it as a
