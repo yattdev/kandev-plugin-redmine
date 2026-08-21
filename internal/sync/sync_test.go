@@ -246,9 +246,13 @@ func TestPushWriteback_AlreadyPushedSameStatus_IsIdempotent(t *testing.T) {
 	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
 	require.NoError(t, tl.RecordPushedStatus(context.Background(), "task-1", 2)) // already pushed
 
-	callCount := 0
+	putCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"issue":{"id":42,"status":{"id":2}}}`))
+			return
+		}
+		putCount++
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -257,7 +261,27 @@ func TestPushWriteback_AlreadyPushedSameStatus_IsIdempotent(t *testing.T) {
 
 	err := svc.PushWriteback(context.Background(), "task-1", "step-done", testMapping(), issuesSvc, Options{AutoStatusWriteback: true})
 	require.NoError(t, err)
-	require.Equal(t, 0, callCount, "a duplicate write-back for the same already-pushed status must not issue a redundant PUT")
+	require.Equal(t, 0, putCount, "a duplicate write-back for the same live Redmine status must not issue a redundant PUT")
+}
+
+func TestPushWriteback_StaleMarkerDoesNotSuppressRemoteDrift(t *testing.T) {
+	host := newFakeHost()
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	require.NoError(t, tl.RecordPushedStatus(context.Background(), "task-1", 2))
+	putCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"issue":{"id":42,"status":{"id":1}}}`))
+			return
+		}
+		putCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	require.NoError(t, svc.PushWriteback(context.Background(), "task-1", "step-done", testMapping(), issues.New(redmineclient.New(srv.URL, "key", srv.Client())), Options{AutoStatusWriteback: true}))
+	require.Equal(t, 1, putCount)
 }
 
 func TestEchoSuppression_WriteBackThenInboundPoll_DoesNotBounceTask(t *testing.T) {

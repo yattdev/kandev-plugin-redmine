@@ -172,7 +172,10 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 
 	update := pluginsdk.UpdateTaskInput{ID: taskID}
 	changed := false
-	statusEcho, titleEcho, descriptionEcho := false, false, false
+	statusEcho, staleStatusMarker, titleEcho, descriptionEcho := false, false, false, false
+	if link.LastPushedStatusID != nil && *link.LastPushedStatusID != issue.StatusID {
+		staleStatusMarker = true
+	}
 
 	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok {
 		statusEcho = link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
@@ -190,8 +193,8 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 		}
 	}
 	if !changed {
-		if statusEcho || titleEcho || descriptionEcho {
-			return s.tasklink.ConsumeEcho(ctx, taskID, statusEcho, titleEcho, descriptionEcho)
+		if statusEcho || staleStatusMarker || titleEcho || descriptionEcho {
+			return s.tasklink.ConsumeEcho(ctx, taskID, statusEcho || staleStatusMarker, titleEcho, descriptionEcho)
 		}
 		return nil
 	}
@@ -203,8 +206,8 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 		}
 		return fmt.Errorf("sync: applying inbound update to task %s: %w", taskID, err)
 	}
-	if statusEcho || titleEcho || descriptionEcho {
-		if err := s.tasklink.ConsumeEcho(ctx, taskID, statusEcho, titleEcho, descriptionEcho); err != nil {
+	if statusEcho || staleStatusMarker || titleEcho || descriptionEcho {
+		if err := s.tasklink.ConsumeEcho(ctx, taskID, statusEcho || staleStatusMarker, titleEcho, descriptionEcho); err != nil {
 			return err
 		}
 	}
@@ -255,9 +258,6 @@ func (s *Service) forceWriteback(ctx context.Context, taskID string, statusID in
 	link, found, err := s.tasklink.Get(ctx, taskID)
 	if err != nil || !found {
 		return err
-	}
-	if link.LastPushedStatusID != nil && *link.LastPushedStatusID == statusID {
-		return nil
 	}
 	// Echo markers are intentionally one-shot. Once inbound polling consumes
 	// one, a redelivered task.moved must still not issue a second PUT when
