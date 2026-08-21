@@ -71,6 +71,69 @@ function makeLinkTaskAction(host) {
   };
 }
 
+function taskActionInvoke(host, key, context, body) {
+  return host.api.invokeAction(key, { workspaceId: context.workspaceId, taskId: context.taskId, body }).then((result) => {
+    if (result && result.kind) throw new Error(result.error || "Redmine action failed.");
+    return result;
+  });
+}
+
+function makeSetRedmineStatusAction(host) {
+  const h = host.jsx;
+  return {
+    id: "redmine-set-status", label: "Set Redmine status", group: "primary", singleTaskOnly: true,
+    async run(context) {
+      try {
+        const link = await taskActionInvoke(host, "link.get", context, {});
+        if (!link.linked) throw new Error("Link this task to a Redmine issue first.");
+        const fields = await taskActionInvoke(host, "fieldmapping.get", context, {});
+        const statuses = fields.live_statuses || [];
+        const closeRef = {};
+        function StatusModal() {
+          const React = host.React;
+          const [statusId, setStatusId] = React.useState("");
+          const [error, setError] = React.useState(null);
+          const submit = async () => {
+            const id = Number(statusId);
+            if (!Number.isSafeInteger(id) || id <= 0) { setError("Select a Redmine status."); return; }
+            try { await taskActionInvoke(host, "link.set_status", context, { status_id: id }); host.toast.success("Redmine status updated."); closeRef.close && closeRef.close(); }
+            catch (err) { setError(err.message || String(err)); }
+          };
+          return h("div", { "data-testid": "redmine-status-modal" },
+            h("label", { htmlFor: "redmine-status-picker" }, "Redmine status"),
+            h("select", { id: "redmine-status-picker", "data-testid": "redmine-status-picker", value: statusId, onChange: (event) => setStatusId(event.target.value) }, [h("option", { value: "" }, "Select status")].concat(statuses.map((status) => h("option", { key: status.id, value: status.id }, status.name)))),
+            error ? h("p", { "data-testid": "redmine-status-error" }, error) : null,
+            h("button", { type: "button", "data-testid": "redmine-status-confirm", onClick: submit }, "Update status"),
+          );
+        }
+        const handle = host.openModal({ title: "Set Redmine status", size: "sm", content: StatusModal });
+        closeRef.close = handle.close;
+      } catch (err) { host.toast.error(err.message || String(err)); }
+    },
+  };
+}
+
+function makeUnlinkRedmineAction(host) {
+  const h = host.jsx;
+  return {
+    id: "redmine-unlink", label: "Unlink Redmine issue", group: "primary", singleTaskOnly: true,
+    async run(context) {
+      try {
+        const link = await taskActionInvoke(host, "link.get", context, {});
+        if (!link.linked) throw new Error("This task is not linked to a Redmine issue.");
+        const closeRef = {};
+        function UnlinkModal() {
+          const [error, setError] = host.React.useState(null);
+          const confirm = async () => { try { await taskActionInvoke(host, "link.unset", context, {}); host.toast.success("Redmine issue unlinked."); closeRef.close && closeRef.close(); } catch (err) { setError(err.message || String(err)); } };
+          return h("div", { "data-testid": "redmine-unlink-modal" }, h("p", null, "Unlink this task from Redmine?"), error ? h("p", { "data-testid": "redmine-unlink-error" }, error) : null, h("button", { type: "button", "data-testid": "redmine-unlink-confirm", onClick: confirm }, "Unlink"));
+        }
+        const handle = host.openModal({ title: "Unlink Redmine issue", size: "sm", content: UnlinkModal });
+        closeRef.close = handle.close;
+      } catch (err) { host.toast.error(err.message || String(err)); }
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Settings page — registerIntegrationSettings. Built from independent
 // sections (Connection, Projects, Field mapping, Sync options, Watchers) so
@@ -776,6 +839,8 @@ function makeSettingsComponent(host) {
 window.registerKandevPlugin("kandev-plugin-redmine", {
   initialize(registry, host) {
     registry.registerTaskAction(makeLinkTaskAction(host));
+    registry.registerTaskMenuAction(makeSetRedmineStatusAction(host));
+    registry.registerTaskMenuAction(makeUnlinkRedmineAction(host));
     registry.registerIntegrationSettings({
       id: "redmine",
       label: "Redmine",
