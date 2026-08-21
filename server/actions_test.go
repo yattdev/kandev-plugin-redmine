@@ -276,6 +276,19 @@ func TestHandleAction_WatchesRejectForgedInvalidOrUnselectedInputs(t *testing.T)
 	require.Contains(t, out["error"], "not selected")
 }
 
+func TestHandleAction_SyncOptionsGetRoundTripsAndPreservesOtherToggle(t *testing.T) {
+	p, _ := newTestPlugin()
+	handle(t, p, "syncoptions.save", "ws-1", "", map[string]any{"auto_status_writeback": true, "sync_title_description": false})
+	loaded := handle(t, p, "syncoptions.get", "ws-1", "", nil)
+	require.Equal(t, true, loaded["auto_status_writeback"])
+	require.Equal(t, false, loaded["sync_title_description"])
+	// UI saves both loaded values when changing either switch.
+	handle(t, p, "syncoptions.save", "ws-1", "", map[string]any{"auto_status_writeback": true, "sync_title_description": true})
+	loaded = handle(t, p, "syncoptions.get", "ws-1", "", nil)
+	require.Equal(t, true, loaded["auto_status_writeback"])
+	require.Equal(t, true, loaded["sync_title_description"])
+}
+
 func TestApplyWatchMapping_BackfillsLegacyWatchPlacementAndAttributes(t *testing.T) {
 	statusID := 5
 	legacy := watch.Watch{ID: "legacy", WorkspaceID: "ws-1", ProjectID: 1, StatusID: &statusID}

@@ -54,6 +54,8 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleFieldMappingSave(ctx, req)
 	case "syncoptions.save":
 		return p.handleSyncOptionsSave(ctx, req)
+	case "syncoptions.get":
+		return p.handleSyncOptionsGet(ctx, req)
 	case "issues.create":
 		return p.handleIssueCreate(ctx, req)
 	case "issues.update":
@@ -367,6 +369,14 @@ func (p *redminePlugin) validateMappingWorkflow(ctx context.Context, workspaceID
 }
 
 // --- syncoptions.* --------------------------------------------------------
+
+func (p *redminePlugin) handleSyncOptionsGet(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	opts, err := p.syncSvc.GetOptions(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResponse(map[string]bool{"auto_status_writeback": opts.AutoStatusWriteback, "sync_title_description": opts.SyncTitleDescription})
+}
 
 func (p *redminePlugin) handleSyncOptionsSave(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
 	body, err := decodeBody[syncOptionsSaveRequest](req)

@@ -82,6 +82,7 @@ actions:
   - { key: "fieldmapping.get", scope: "workspace", max_body_bytes: 8192 }
   - { key: "fieldmapping.save", scope: "workspace", max_body_bytes: 65536 }
   - { key: "syncoptions.save", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "syncoptions.get", scope: "workspace", max_body_bytes: 8192 }
   - { key: "issues.create", scope: "workspace", max_body_bytes: 65536 }
   - { key: "issues.update", scope: "workspace", max_body_bytes: 65536 }
   - { key: "issues.upload", scope: "workspace", max_body_bytes: 1048576 }

@@ -90,8 +90,12 @@ function makeSettingsComponent(host) {
     Spinner,
   } = ui;
 
-  function invoke(key, workspaceId, body) {
-    return host.api.invokeAction(key, { workspaceId, body });
+  async function invoke(key, workspaceId, body) {
+    const result = await host.api.invokeAction(key, { workspaceId, body });
+    if (result && result.kind) {
+      throw new Error(result.error || "Redmine action failed.");
+    }
+    return result;
   }
 
   function errorMessage(err) {
@@ -488,6 +492,18 @@ function makeSettingsComponent(host) {
     const React = host.React;
     const [autoStatusWriteback, setAutoStatusWriteback] = React.useState(false);
     const [syncTitleDescription, setSyncTitleDescription] = React.useState(false);
+    const [loading, setLoading] = React.useState(true);
+
+    React.useEffect(() => {
+      if (!connected) { setLoading(false); return; }
+      let active = true;
+      invoke("syncoptions.get", workspaceId, {}).then((options) => {
+        if (!active) return;
+        setAutoStatusWriteback(Boolean(options.auto_status_writeback));
+        setSyncTitleDescription(Boolean(options.sync_title_description));
+      }).catch((err) => toast.error(errorMessage(err))).finally(() => { if (active) setLoading(false); });
+      return () => { active = false; };
+    }, [workspaceId, connected]);
 
     const save = async (next) => {
       await invoke("syncoptions.save", workspaceId, {
@@ -497,6 +513,7 @@ function makeSettingsComponent(host) {
     };
 
     if (!connected) return null;
+    if (loading) return h(Spinner, { id: "redmine-syncoptions-loading", "data-testid": "redmine-syncoptions-loading" });
 
     return h(
       Card,
