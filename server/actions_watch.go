@@ -113,6 +113,42 @@ func (p *redminePlugin) validateWatch(ctx context.Context, w watch.Watch) error 
 	}
 	for _, projectID := range selected {
 		if projectID == w.ProjectID {
+			client, err := p.connectionSvc.Client(ctx, w.WorkspaceID)
+			if err != nil {
+				return err
+			}
+			if w.TrackerID != nil {
+				trackers, err := client.ListTrackers(ctx)
+				if err != nil {
+					return err
+				}
+				found := false
+				for _, tracker := range trackers {
+					if tracker.ID == *w.TrackerID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("redmine: tracker_id %d is not available", *w.TrackerID)
+				}
+			}
+			if w.StatusID != nil {
+				statuses, err := client.ListIssueStatuses(ctx)
+				if err != nil {
+					return err
+				}
+				found := false
+				for _, status := range statuses {
+					if status.ID == *w.StatusID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("redmine: status_id %d is not available", *w.StatusID)
+				}
+			}
 			return nil
 		}
 	}

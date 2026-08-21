@@ -567,7 +567,12 @@ function makeSettingsComponent(host) {
     const React = host.React;
     const [watches, setWatches] = React.useState([]);
     const [loading, setLoading] = React.useState(true);
+    const [projects, setProjects] = React.useState([]);
+    const [trackers, setTrackers] = React.useState([]);
+    const [statuses, setStatuses] = React.useState([]);
     const [newProjectId, setNewProjectId] = React.useState("");
+    const [newTrackerId, setNewTrackerId] = React.useState("");
+    const [newStatusId, setNewStatusId] = React.useState("");
     const [newMaxInflight, setNewMaxInflight] = React.useState("");
 
     const load = React.useCallback(async () => {
@@ -577,8 +582,14 @@ function makeSettingsComponent(host) {
       }
       setLoading(true);
       try {
-        const result = await invoke("watches.list", workspaceId, {});
+        const [result, projectResult, mappingResult] = await Promise.all([
+          invoke("watches.list", workspaceId, {}), invoke("projects.list", workspaceId, {}), invoke("fieldmapping.get", workspaceId, {}),
+        ]);
         setWatches((result && result.watches) || []);
+        const selected = new Set((projectResult && projectResult.selected_ids) || []);
+        setProjects(((projectResult && projectResult.projects) || []).filter((project) => selected.has(project.id)));
+        setTrackers((mappingResult && mappingResult.live_trackers) || []);
+        setStatuses((mappingResult && mappingResult.live_statuses) || []);
       } catch (err) {
         toast.error(errorMessage(err));
       } finally {
@@ -595,17 +606,25 @@ function makeSettingsComponent(host) {
 
     const onCreate = async () => {
       const projectId = parseInt(newProjectId, 10);
-      if (!Number.isFinite(projectId)) {
-        toast.error("Enter a numeric project id.");
+      if (!Number.isSafeInteger(projectId) || projectId <= 0) {
+        toast.error("Select a project.");
         return;
       }
       const maxInflight = parseInt(newMaxInflight, 10);
+      if (newMaxInflight !== "" && (!Number.isSafeInteger(maxInflight) || maxInflight < 0)) {
+        toast.error("Max inflight tasks must be a non-negative integer.");
+        return;
+      }
       await invoke("watches.create", workspaceId, {
         project_id: projectId,
+        tracker_id: newTrackerId ? parseInt(newTrackerId, 10) : null,
+        status_id: newStatusId ? parseInt(newStatusId, 10) : null,
         max_inflight_tasks: Number.isFinite(maxInflight) ? maxInflight : 0,
         enabled: true,
       });
       setNewProjectId("");
+      setNewTrackerId("");
+      setNewStatusId("");
       setNewMaxInflight("");
       toast.success("Watch created.");
       await load();
@@ -651,7 +670,7 @@ function makeSettingsComponent(host) {
                   h(
                     TableRow,
                     { key: watch.id },
-                    h(TableCell, null, watch.project_id),
+                    h(TableCell, null, (projects.find((project) => project.id === watch.project_id) || {}).name || watch.project_id),
                     h(TableCell, null, watch.max_inflight_tasks || "unlimited"),
                     h(TableCell, null, h(Switch, { checked: watch.enabled, onCheckedChange: () => onToggle(watch) })),
                     h(TableCell, null, h(Button, { variant: "outline", size: "sm", onClick: () => onDelete(watch) }, "Delete")),
@@ -665,12 +684,23 @@ function makeSettingsComponent(host) {
           h(
             "div",
             null,
-            h(Label, { htmlFor: "redmine-new-watch-project" }, "Project id"),
-            h(Input, {
+            h(Label, { htmlFor: "redmine-new-watch-project" }, "Project"),
+            h("select", {
               id: "redmine-new-watch-project",
+              "data-testid": "redmine-watch-project",
               value: newProjectId,
               onChange: (e) => setNewProjectId(e.target.value),
-            }),
+            }, [h("option", { value: "" }, "Select project")].concat(projects.map((project) => h("option", { key: project.id, value: project.id }, project.name)))),
+          ),
+          h(
+            "div", null,
+            h(Label, { htmlFor: "redmine-new-watch-tracker" }, "Tracker (optional)"),
+            h("select", { id: "redmine-new-watch-tracker", "data-testid": "redmine-watch-tracker", value: newTrackerId, onChange: (e) => setNewTrackerId(e.target.value) }, [h("option", { value: "" }, "Any tracker")].concat(trackers.map((tracker) => h("option", { key: tracker.id, value: tracker.id }, tracker.name)))),
+          ),
+          h(
+            "div", null,
+            h(Label, { htmlFor: "redmine-new-watch-status" }, "Status (optional)"),
+            h("select", { id: "redmine-new-watch-status", "data-testid": "redmine-watch-status", value: newStatusId, onChange: (e) => setNewStatusId(e.target.value) }, [h("option", { value: "" }, "Any status")].concat(statuses.map((status) => h("option", { key: status.id, value: status.id }, status.name)))),
           ),
           h(
             "div",
@@ -678,12 +708,15 @@ function makeSettingsComponent(host) {
             h(Label, { htmlFor: "redmine-new-watch-max" }, "Max inflight tasks"),
             h(Input, {
               id: "redmine-new-watch-max",
+              "data-testid": "redmine-watch-max-inflight",
+              type: "number",
+              min: 0,
               placeholder: "0 = unlimited",
               value: newMaxInflight,
               onChange: (e) => setNewMaxInflight(e.target.value),
             }),
           ),
-          h(Button, { id: "redmine-watchers-create", onClick: onCreate }, "Add watch"),
+          h(Button, { id: "redmine-watchers-create", "data-testid": "redmine-watch-create", onClick: onCreate }, "Add watch"),
         ),
       ),
     );
