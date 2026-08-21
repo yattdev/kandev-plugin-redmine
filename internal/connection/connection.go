@@ -1,5 +1,5 @@
 // Package connection owns the Redmine connection lifecycle: validating a
-// base URL + API key, persisting the encrypted key and connection metadata,
+// base URL + API key, persisting the host-managed secret and connection metadata,
 // and the workspace index the health poller (healthpoll.go) walks. One
 // Service instance is shared by every workspace; every method takes the
 // caller-supplied workspaceID and derives its own plugin_state/secret keys
@@ -72,7 +72,7 @@ func New(host pluginsdk.Host) *Service {
 }
 
 // Connect validates baseURL+apiKey against GET /users/current.json. On
-// success it encrypts and persists the key plus StateConnected metadata and
+// success it persists the key through the host secret boundary plus StateConnected metadata and
 // returns the new Record. On failure — invalid credentials, API disabled, or
 // unreachable host, each a distinct *redmineclient.APIError via errors.As —
 // nothing is persisted and any previously stored connection is left
@@ -163,7 +163,7 @@ func (s *Service) getLocked(ctx context.Context, workspaceID string) (*Record, b
 }
 
 // Client resolves an authenticated *redmineclient.Client for workspaceID
-// from its stored connection record and decrypted secret — the shared way
+// from its stored connection record and host-managed secret — the shared way
 // every other package (issues, projects, fieldmapping, sync, watch) reaches
 // Redmine for a given workspace.
 func (s *Service) Client(ctx context.Context, workspaceID string) (*redmineclient.Client, error) {
@@ -196,7 +196,7 @@ func (s *Service) clientSnapshot(ctx context.Context, workspaceID string) (*Reco
 	return record, redmineclient.New(record.BaseURL, apiKey, s.httpClient), true, nil
 }
 
-// Disconnect removes both the encrypted secret and the connection state for
+// Disconnect removes both the host-managed secret and the connection state for
 // workspaceID and stops it from being health-polled.
 func (s *Service) Disconnect(ctx context.Context, workspaceID string) error {
 	s.mu.Lock()
@@ -321,7 +321,8 @@ func (s *Service) markHealthLocked(ctx context.Context, workspaceID, revision st
 	return s.saveRecord(ctx, workspaceID, current)
 }
 
-// decryptedAPIKey resolves and decrypts the stored API key for workspaceID.
+// decryptedAPIKey resolves the host-managed key, decoding only a legacy v0.1
+// plugin-side envelope during upgrade migration.
 func (s *Service) decryptedAPIKey(ctx context.Context, workspaceID string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

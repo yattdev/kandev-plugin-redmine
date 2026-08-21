@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -110,4 +111,22 @@ func TestHealthPoll_StopCancelsPendingWait(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Stop() did not return promptly; health poll loop is not selecting on ctx.Done()")
 	}
+}
+
+func TestHealthPoll_ConcurrentStartStopDoesNotOverlapRuns(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	poller := NewHealthPoller(svc, WithInterval(time.Hour), WithJitter(0))
+	poller.Start(context.Background())
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() { defer wg.Done(); poller.Start(context.Background()); poller.Stop() }()
+	}
+	wg.Wait()
+	poller.mu.Lock()
+	running, stopping := poller.running, poller.stopping
+	poller.mu.Unlock()
+	require.False(t, running)
+	require.False(t, stopping)
 }

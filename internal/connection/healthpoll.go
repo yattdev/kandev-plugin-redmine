@@ -28,10 +28,11 @@ type HealthPoller struct {
 	jitter   time.Duration
 	rng      *rand.Rand
 
-	mu      sync.Mutex
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	running bool
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	running  bool
+	stopping bool
 }
 
 type HealthPollerOption func(*HealthPoller)
@@ -61,7 +62,7 @@ func NewHealthPoller(svc *Service, opts ...HealthPollerOption) *HealthPoller {
 func (p *HealthPoller) Start(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.running {
+	if p.running || p.stopping {
 		return
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -75,16 +76,21 @@ func (p *HealthPoller) Start(ctx context.Context) {
 // call without a prior Start.
 func (p *HealthPoller) Stop() {
 	p.mu.Lock()
-	if !p.running {
+	if !p.running || p.stopping {
 		p.mu.Unlock()
 		return
 	}
 	cancel := p.cancel
-	p.running = false
+	p.stopping = true
 	p.mu.Unlock()
 
 	cancel()
 	p.wg.Wait()
+	p.mu.Lock()
+	p.running = false
+	p.stopping = false
+	p.cancel = nil
+	p.mu.Unlock()
 }
 
 func (p *HealthPoller) run(ctx context.Context) {
