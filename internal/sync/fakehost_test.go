@@ -101,6 +101,9 @@ func (r fakeTaskReader) Update(_ context.Context, in pluginsdk.UpdateTaskInput) 
 	if in.Description != nil {
 		r.host.task.Description = *in.Description
 	}
+	if in.WorkflowStepID != nil {
+		r.host.task.WorkflowStepID = *in.WorkflowStepID
+	}
 	r.host.mu.Unlock()
 	return &pluginsdk.Task{ID: in.ID}, nil
 }

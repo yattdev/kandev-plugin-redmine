@@ -179,7 +179,7 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 
 	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok {
 		statusEcho = link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
-		if !statusEcho {
+		if !statusEcho && task.WorkflowStepID != stepID {
 			update.WorkflowStepID = &stepID
 			changed = true
 		}

@@ -144,6 +144,37 @@ func TestPollInbound_OverlappedUnchangedTitleDescriptionWritesOnce(t *testing.T)
 	require.Len(t, host.updateCalls(), 1)
 }
 
+func TestPollInbound_OverlappedMappedStatusTransitionsOnlyOnce(t *testing.T) {
+	host := newFakeHost()
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":2},"updated_on":"2026-01-01T00:00:00Z"}],"total_count":1}`))
+	}))
+	defer srv.Close()
+	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
+	require.Len(t, host.updateCalls(), 1)
+	require.Equal(t, "step-done", host.task.WorkflowStepID)
+}
+
+func TestPollInbound_ManualMoveAwayIsRestoredFromMappedRedmineStatus(t *testing.T) {
+	host := newFakeHost()
+	host.task.WorkflowStepID = "step-other"
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":2},"updated_on":"2026-01-01T00:00:00Z"}],"total_count":1}`))
+	}))
+	defer srv.Close()
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
+	require.Equal(t, "step-done", host.task.WorkflowStepID)
+	require.Len(t, host.updateCalls(), 1)
+}
+
 func TestPollInbound_CursorAdvancesAndPersistsAcrossRestarts(t *testing.T) {
 	host := newFakeHost()
 	tl := tasklink.New(host)
