@@ -89,6 +89,25 @@ func TestHandleAction_ConnectionSaveThenGet_RoundTrips(t *testing.T) {
 	require.Equal(t, "connected", got["state"])
 }
 
+func TestHandleAction_ConnectionResponsesNeverSerializeAPIKey(t *testing.T) {
+	p, _ := newTestPlugin(t)
+	srv := redmineFixtureServer(t, nil)
+	for _, actionKey := range []string{"connection.save", "connection.get"} {
+		var body []byte
+		if actionKey == "connection.save" {
+			body = []byte(`{"base_url":"` + srv.URL + `","api_key":"test-api-key"}`)
+		}
+		resp, err := p.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+			ActionKey: actionKey,
+			Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "ws-1"},
+			Body:      body,
+		})
+		require.NoError(t, err)
+		require.NotContains(t, string(resp.Body), "api_key")
+		require.NotContains(t, string(resp.Body), "test-api-key")
+	}
+}
+
 func TestHandleAction_ConnectionSave_InvalidKey_ReturnsClassifiedError(t *testing.T) {
 	p, _ := newTestPlugin(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

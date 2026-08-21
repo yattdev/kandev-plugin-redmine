@@ -44,9 +44,10 @@ workspace's state.
    enabled. Manual write-back remains available when it is disabled.
 9. Search Redmine issues in the composer and reauthorize a selected reference
    immediately before submission.
-10. Create watcher tasks once per matching issue, deduplicate them, enforce the
-    configured inflight cap, and delete owned task trees when a watch or its
-    connection is removed. Disconnect before uninstall: host uninstall stops
+10. Create watcher tasks once per matching issue, automatically link them to
+    the originating Redmine issue, deduplicate them, enforce the configured
+    inflight cap, and delete owned task trees when a watch or its connection
+    is removed. Disconnect before uninstall: host uninstall stops
     the plugin and purges its state/secrets, but has no pre-uninstall hook to
     delete plugin-owned task trees.
 11. Preserve state on Redmine failures, retry with bounded backoff, show

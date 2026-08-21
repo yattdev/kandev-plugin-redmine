@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"kandev-plugin-redmine/internal/issues"
+	"kandev-plugin-redmine/internal/tasklink"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
 	"google.golang.org/grpc/codes"
@@ -70,15 +71,18 @@ const (
 )
 
 type Service struct {
-	host pluginsdk.Host
+	host      pluginsdk.Host
+	tasklinks *tasklink.Service
 	// One mutex deliberately serializes polls with create/update/delete/clear.
 	// This prevents duplicate issue tasks and watch resurrection; watch volume
 	// is small enough that correctness currently outweighs parallel polling.
 	mu sync.Mutex
 }
 
-func New(host pluginsdk.Host) *Service {
-	return &Service{host: host}
+// New requires the plugin's existing task-link service. This makes every
+// successfully indexed watcher task participate in the shared sync index.
+func New(host pluginsdk.Host, tasklinks *tasklink.Service) *Service {
+	return &Service{host: host, tasklinks: tasklinks}
 }
 
 // CreateWatch persists a new watch with a fresh ID.
@@ -178,11 +182,9 @@ func (s *Service) deleteWatchLocked(ctx context.Context, workspaceID, watchID st
 	if err != nil {
 		return err
 	}
-	if manager, ok := pluginsdk.PluginOwnedTaskTrees(s.host); ok {
-		for _, taskID := range tasks {
-			if _, err := manager.Delete(ctx, taskID); err != nil {
-				return fmt.Errorf("watch: cascading delete for task %s: %w", taskID, err)
-			}
+	for _, taskID := range tasks {
+		if err := s.deleteOwnedTaskAndLink(ctx, workspaceID, watchID, taskID); err != nil {
+			return err
 		}
 	}
 	if err := s.host.DeleteState(ctx, watchScope, watchStateID(workspaceID, watchID), tasksKey); err != nil {
@@ -300,13 +302,59 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 	if err != nil {
 		return fmt.Errorf("watch: creating task for issue %d: %w", issue.ID, err)
 	}
+	if err := s.tasklinks.Set(ctx, task.ID, w.WorkspaceID, issue.ID, issue.URL); err != nil {
+		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: linking task %s: %w", task.ID, err))
+	}
 	if err := s.recordWatchTask(ctx, w.WorkspaceID, w.ID, issue.ID, task.ID); err != nil {
-		if manager, ok := pluginsdk.PluginOwnedTaskTrees(s.host); ok {
-			if _, cleanupErr := manager.Delete(ctx, task.ID); cleanupErr != nil {
-				return fmt.Errorf("watch: recording task %s: %w", task.ID, errors.Join(err, fmt.Errorf("compensating task delete: %w", cleanupErr)))
-			}
+		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: recording task %s: %w", task.ID, err))
+	}
+	return nil
+}
+
+func (s *Service) compensateCreatedTask(ctx context.Context, taskID string, cause error) error {
+	var cleanup error
+	if err := s.tasklinks.Unset(ctx, taskID); err != nil {
+		cleanup = errors.Join(cleanup, fmt.Errorf("compensating link removal: %w", err))
+	}
+	if manager, ok := pluginsdk.PluginOwnedTaskTrees(s.host); ok {
+		if _, err := manager.Delete(ctx, taskID); err != nil {
+			cleanup = errors.Join(cleanup, fmt.Errorf("compensating task delete: %w", err))
 		}
-		return fmt.Errorf("watch: recording task %s: %w", task.ID, err)
+	} else {
+		cleanup = errors.Join(cleanup, errors.New("compensating task delete: host lacks PluginOwnedTaskTrees"))
+	}
+	if cleanup != nil {
+		return errors.Join(cause, cleanup)
+	}
+	return cause
+}
+
+func (s *Service) deleteOwnedTaskAndLink(ctx context.Context, workspaceID, watchID, taskID string) error {
+	manager, ok := pluginsdk.PluginOwnedTaskTrees(s.host)
+	if !ok {
+		return errors.New("watch: host lacks PluginOwnedTaskTrees for cascade cleanup")
+	}
+	link, found, err := s.tasklinks.Get(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("watch: reading link for task %s: %w", taskID, err)
+	}
+	if found && link.WorkspaceID != workspaceID {
+		return fmt.Errorf("watch: refusing to cascade task %s with link owned by workspace %s", taskID, link.WorkspaceID)
+	}
+	task, err := s.host.Tasks().Get(ctx, taskID)
+	if err != nil && status.Code(err) != codes.NotFound {
+		return fmt.Errorf("watch: reading task %s before cascade: %w", taskID, err)
+	}
+	if err == nil && (task.WorkspaceID != workspaceID || task.Metadata[metadataKeyWatchID] != watchID) {
+		return fmt.Errorf("watch: refusing to cascade task %s outside workspace/watch ownership", taskID)
+	}
+	if _, err := manager.Delete(ctx, taskID); err != nil {
+		return fmt.Errorf("watch: cascading delete for task %s: %w", taskID, err)
+	}
+	if found {
+		if err := s.tasklinks.Unset(ctx, taskID); err != nil {
+			return fmt.Errorf("watch: removing link for task %s: %w", taskID, err)
+		}
 	}
 	return nil
 }

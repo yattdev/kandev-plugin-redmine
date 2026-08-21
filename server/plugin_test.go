@@ -5,12 +5,20 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"kandev-plugin-redmine/internal/issues"
+	"kandev-plugin-redmine/internal/redmineclient"
+	"kandev-plugin-redmine/internal/watch"
 )
 
 // fakeHost is an in-memory pluginsdk.Host test double: it actually stores
@@ -24,10 +32,12 @@ type fakeHost struct {
 	state   map[string]map[string]any
 	secrets map[string]string
 	updates []pluginsdk.UpdateTaskInput
+	tasks   map[string]*pluginsdk.Task
+	nextID  int
 }
 
 func newFakeHost() *fakeHost {
-	return &fakeHost{state: make(map[string]map[string]any), secrets: make(map[string]string)}
+	return &fakeHost{state: make(map[string]map[string]any), secrets: make(map[string]string), tasks: make(map[string]*pluginsdk.Task)}
 }
 
 func stateKeyOf(scope, scopeID, key string) string { return scope + "/" + scopeID + "/" + key }
@@ -95,6 +105,10 @@ func (h *fakeHost) Tasks() pluginsdk.TaskReader {
 
 func (h *fakeHost) Workflows() pluginsdk.WorkflowReader { return fakeWorkflowReader{} }
 
+func (h *fakeHost) PluginOwnedTaskTrees() pluginsdk.PluginOwnedTaskTreeManager {
+	return fakeTaskTreeManager{host: h}
+}
+
 // fakeWorkflowReader returns one fixed workflow with two steps, enough to
 // exercise the workflows.list action without a real Kandev host.
 type fakeWorkflowReader struct{}
@@ -128,7 +142,48 @@ func (r fakeTaskReader) Update(_ context.Context, in pluginsdk.UpdateTaskInput) 
 	return &pluginsdk.Task{ID: in.ID}, nil
 }
 
+func (r fakeTaskReader) Create(_ context.Context, in pluginsdk.CreateTaskInput) (*pluginsdk.Task, error) {
+	r.host.mu.Lock()
+	defer r.host.mu.Unlock()
+	r.host.nextID++
+	task := &pluginsdk.Task{ID: fmt.Sprintf("task-%d", r.host.nextID), WorkspaceID: in.WorkspaceID, Title: in.Title, Description: in.Description, State: "RUNNING", Metadata: in.Metadata}
+	r.host.tasks[task.ID] = task
+	return task, nil
+}
+
+func (r fakeTaskReader) Get(_ context.Context, taskID string) (*pluginsdk.Task, error) {
+	r.host.mu.Lock()
+	defer r.host.mu.Unlock()
+	task, found := r.host.tasks[taskID]
+	if !found {
+		return nil, status.Error(codes.NotFound, "task not found")
+	}
+	copyTask := *task
+	return &copyTask, nil
+}
+
+type fakeTaskTreeManager struct{ host *fakeHost }
+
+func (m fakeTaskTreeManager) Preview(_ context.Context, taskID string) ([]pluginsdk.Task, error) {
+	task, err := fakeTaskReader{host: m.host}.Get(context.Background(), taskID)
+	if err != nil {
+		return nil, nil
+	}
+	return []pluginsdk.Task{*task}, nil
+}
+
+func (m fakeTaskTreeManager) Delete(_ context.Context, taskID string) ([]string, error) {
+	m.host.mu.Lock()
+	defer m.host.mu.Unlock()
+	if _, found := m.host.tasks[taskID]; !found {
+		return nil, nil
+	}
+	delete(m.host.tasks, taskID)
+	return []string{taskID}, nil
+}
+
 var _ pluginsdk.Host = (*fakeHost)(nil)
+var _ pluginsdk.PluginOwnedTaskTreeHost = (*fakeHost)(nil)
 
 func TestRedminePlugin_HostRoundTrip(t *testing.T) {
 	p := &redminePlugin{}
@@ -198,4 +253,25 @@ func TestRedminePlugin_StopIsConcurrentAndIdempotent(t *testing.T) {
 	}
 	// A later stop observes the closed stop channel and is a no-op.
 	p.stop()
+}
+
+func TestRedminePlugin_PollWatchesLinksCreatedTaskThroughSharedService(t *testing.T) {
+	p, _ := newTestPlugin(t)
+	w, err := p.watchSvc.CreateWatch(context.Background(), watch.Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	srv := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, _ *http.Request) {
+		_, _ = res.Write([]byte(`{"issues":[{"id":42,"subject":"from watcher"}],"total_count":1}`))
+	}))
+	defer srv.Close()
+	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
+
+	require.NoError(t, p.pollWatches(context.Background(), "ws-1", issuesSvc))
+	taskID, found, err := p.tasklinkSvc.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.True(t, found)
+	link, found, err := p.tasklinkSvc.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, 42, link.IssueID)
+	require.Equal(t, w.WorkspaceID, link.WorkspaceID)
 }

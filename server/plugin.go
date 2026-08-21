@@ -75,7 +75,7 @@ func (p *redminePlugin) SetHost(host pluginsdk.Host) {
 	p.fieldmappingSvc = fieldmapping.New(host)
 	p.tasklinkSvc = tasklink.New(host)
 	p.syncSvc = redminesync.New(host, p.tasklinkSvc)
-	p.watchSvc = watch.New(host)
+	p.watchSvc = watch.New(host, p.tasklinkSvc)
 	p.healthPoller = connection.NewHealthPoller(p.connectionSvc)
 	p.ready = true
 
