@@ -195,6 +195,40 @@ func TestHandleAction_IssueUpdateValidatesIDAndSendsFullPayload(t *testing.T) {
 	require.Equal(t, "text/plain", uploads[0].(map[string]any)["content_type"])
 }
 
+func TestHandleAction_IssueUpdatePreservesOmittedAndExplicitEmptyDescription(t *testing.T) {
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/current.json":
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case "/issues/23.json":
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`{"issue":{"id":23,"project":{"id":1}}}`))
+				return
+			}
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			bodies = append(bodies, body)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	p, _ := newTestPlugin()
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
+
+	require.Equal(t, true, handle(t, p, "issues.update", "ws-1", "", map[string]any{"issue_id": 23, "subject": "  Updated  "})["updated"])
+	require.Equal(t, true, handle(t, p, "issues.update", "ws-1", "", map[string]any{"issue_id": 23, "description": ""})["updated"])
+	first := bodies[0]["issue"].(map[string]any)
+	require.Equal(t, "Updated", first["subject"])
+	_, hasDescription := first["description"]
+	require.False(t, hasDescription)
+	second := bodies[1]["issue"].(map[string]any)
+	require.Equal(t, "", second["description"])
+}
+
 func TestHandleAction_IssueWriteRejectsUntrustedBoundaries(t *testing.T) {
 	p, _ := newTestPlugin()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -226,7 +260,10 @@ func TestHandleAction_IssueWriteRejectsUntrustedBoundaries(t *testing.T) {
 		{"project_id": 1, "tracker_id": 9, "subject": "new"},
 		{"project_id": 1, "status_id": 9, "subject": "new"},
 		{"project_id": 1, "priority_id": 9, "subject": "new"},
+		{"project_id": maxSafeActionID + 1, "subject": "new"},
+		{"project_id": 1, "tracker_id": maxSafeActionID + 1, "subject": "new"},
 		{"project_id": 1, "subject": "new", "custom_fields": []any{map[string]any{"id": -1}}},
+		{"project_id": 1, "subject": "new", "custom_fields": []any{map[string]any{"id": maxSafeActionID + 1}}},
 		{"project_id": 1, "subject": "new", "custom_fields": []any{map[string]any{"id": 1}, map[string]any{"id": 1}}},
 		{"project_id": 1, "subject": "new", "uploads": []any{map[string]any{"token": "", "filename": "x", "content_type": "text/plain"}}},
 		{"project_id": 1, "subject": "new", "uploads": []any{map[string]any{"token": "t", "filename": "x", "content_type": "not a media type;"}}},
@@ -235,9 +272,12 @@ func TestHandleAction_IssueWriteRejectsUntrustedBoundaries(t *testing.T) {
 	}
 	for _, body := range []map[string]any{
 		{"issue_id": 0, "subject": "x"},
+		{"issue_id": maxSafeActionID + 1, "subject": "x"},
 		{"issue_id": 23},
 		{"issue_id": 23, "status_id": 3}, // existing issue belongs to project 2.
 		{"issue_id": 24, "status_id": 0},
+		{"issue_id": 24, "subject": "  "},
+		{"issue_id": 24, "priority_id": maxSafeActionID + 1},
 		{"issue_id": 24, "priority_id": 9},
 		{"issue_id": 24, "custom_fields": []any{map[string]any{"id": 2}, map[string]any{"id": 2}}},
 	} {

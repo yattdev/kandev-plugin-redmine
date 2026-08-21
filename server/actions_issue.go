@@ -15,12 +15,13 @@ import (
 )
 
 const maxAttachmentBytes = 700 * 1024
+const maxSafeActionID = int(1<<53 - 1)
 
 type issueWriteRequest struct {
-	ProjectID    int                       `json:"project_id"`
-	TrackerID    int                       `json:"tracker_id"`
-	StatusID     int                       `json:"status_id"`
-	PriorityID   int                       `json:"priority_id"`
+	ProjectID    *int                      `json:"project_id"`
+	TrackerID    *int                      `json:"tracker_id"`
+	StatusID     *int                      `json:"status_id"`
+	PriorityID   *int                      `json:"priority_id"`
 	Subject      string                    `json:"subject"`
 	Description  string                    `json:"description"`
 	CustomFields []issues.CustomFieldValue `json:"custom_fields"`
@@ -28,7 +29,7 @@ type issueWriteRequest struct {
 }
 
 func (r issueWriteRequest) write() issues.IssueWrite {
-	return issues.IssueWrite{ProjectID: r.ProjectID, TrackerID: r.TrackerID, StatusID: r.StatusID, PriorityID: r.PriorityID, Subject: r.Subject, Description: r.Description, CustomFields: r.CustomFields, Uploads: r.Uploads}
+	return issues.IssueWrite{ProjectID: derefInt(r.ProjectID), TrackerID: derefInt(r.TrackerID), StatusID: derefInt(r.StatusID), PriorityID: derefInt(r.PriorityID), Subject: r.Subject, Description: r.Description, CustomFields: r.CustomFields, Uploads: r.Uploads}
 }
 
 // issueUpdateRequest uses pointers so omitted JSON fields stay omitted in the
@@ -81,11 +82,18 @@ func (p *redminePlugin) handleIssueUpdate(ctx context.Context, req *pluginsdk.Pl
 	if err != nil {
 		return nil, err
 	}
-	if body.IssueID <= 0 {
-		return classifiedErrorResponse(fmt.Errorf("redmine: issue_id is required"))
+	if !validPositiveActionID(body.IssueID) {
+		return classifiedErrorResponse(fmt.Errorf("redmine: issue_id must be a positive safe integer"))
 	}
 	if body.empty() {
 		return classifiedErrorResponse(fmt.Errorf("redmine: update must include at least one field"))
+	}
+	if body.Subject != nil {
+		trimmed := strings.TrimSpace(*body.Subject)
+		if trimmed == "" {
+			return classifiedErrorResponse(fmt.Errorf("redmine: subject must not be blank"))
+		}
+		body.Subject = &trimmed
 	}
 	client, err := p.connectionSvc.Client(ctx, req.Context.WorkspaceID)
 	if err != nil {
@@ -108,10 +116,13 @@ func (p *redminePlugin) handleIssueUpdate(ctx context.Context, req *pluginsdk.Pl
 }
 
 func (p *redminePlugin) validateIssueCreate(ctx context.Context, workspaceID string, client *redmineclient.Client, body issueWriteRequest) error {
-	if err := p.requireSelectedProject(ctx, workspaceID, body.ProjectID); err != nil {
+	if body.ProjectID == nil {
+		return fmt.Errorf("redmine: project_id is required")
+	}
+	if err := p.requireSelectedProject(ctx, workspaceID, *body.ProjectID); err != nil {
 		return err
 	}
-	return validateIssueFields(ctx, client, optionalInt(body.TrackerID), optionalInt(body.StatusID), optionalInt(body.PriorityID), body.CustomFields, body.Uploads)
+	return validateIssueFields(ctx, client, body.TrackerID, body.StatusID, body.PriorityID, body.CustomFields, body.Uploads)
 }
 
 func (p *redminePlugin) validateIssueUpdate(ctx context.Context, workspaceID string, client *redmineclient.Client, body issueUpdateRequest) error {
@@ -123,11 +134,11 @@ func (p *redminePlugin) validateIssueUpdate(ctx context.Context, workspaceID str
 	return validateIssueFields(ctx, client, body.TrackerID, body.StatusID, body.PriorityID, derefCustomFields(body.CustomFields), derefUploads(body.Uploads))
 }
 
-func optionalInt(value int) *int {
-	if value == 0 {
-		return nil
+func derefInt(value *int) int {
+	if value == nil {
+		return 0
 	}
-	return &value
+	return *value
 }
 
 func derefCustomFields(value *[]issues.CustomFieldValue) []issues.CustomFieldValue {
@@ -145,8 +156,8 @@ func derefUploads(value *[]issues.Upload) []issues.Upload {
 }
 
 func (p *redminePlugin) requireSelectedProject(ctx context.Context, workspaceID string, projectID int) error {
-	if projectID <= 0 {
-		return fmt.Errorf("redmine: project_id must be positive")
+	if !validPositiveActionID(projectID) {
+		return fmt.Errorf("redmine: project_id must be a positive safe integer")
 	}
 	selected, err := p.projectsSvc.GetSelection(ctx, workspaceID)
 	if err != nil {
@@ -172,8 +183,8 @@ func validateIssueFields(ctx context.Context, client *redmineclient.Client, trac
 	}
 	seenCustomFields := make(map[int]struct{}, len(customFields))
 	for _, field := range customFields {
-		if field.ID <= 0 {
-			return fmt.Errorf("redmine: custom field id must be positive")
+		if !validPositiveActionID(field.ID) {
+			return fmt.Errorf("redmine: custom field id must be a positive safe integer")
 		}
 		if _, found := seenCustomFields[field.ID]; found {
 			return fmt.Errorf("redmine: custom field id %d is duplicated", field.ID)
@@ -184,8 +195,11 @@ func validateIssueFields(ctx context.Context, client *redmineclient.Client, trac
 		if strings.TrimSpace(upload.Token) == "" || strings.TrimSpace(upload.Filename) == "" {
 			return fmt.Errorf("redmine: uploads require token and filename")
 		}
-		contentType := strings.TrimSpace(upload.ContentType)
-		if contentType == "" || len(contentType) > 255 || strings.ContainsAny(contentType, "\r\n") {
+		if strings.ContainsAny(upload.Token, "\r\n") || strings.ContainsAny(upload.Filename, "\r\n") || upload.Filename != strings.TrimSpace(upload.Filename) {
+			return fmt.Errorf("redmine: upload filename or token is invalid")
+		}
+		contentType := upload.ContentType
+		if contentType == "" || contentType != strings.TrimSpace(contentType) || len(contentType) > 255 || strings.ContainsAny(contentType, "\r\n") {
 			return fmt.Errorf("redmine: upload content_type is invalid")
 		}
 		if _, _, err := mime.ParseMediaType(contentType); err != nil {
@@ -199,8 +213,8 @@ func validateLiveID[T any](ctx context.Context, name string, id *int, list func(
 	if id == nil {
 		return nil
 	}
-	if *id <= 0 {
-		return fmt.Errorf("redmine: %s must be positive", name)
+	if !validPositiveActionID(*id) {
+		return fmt.Errorf("redmine: %s must be a positive safe integer", name)
 	}
 	items, err := list(ctx)
 	if err != nil {
@@ -212,6 +226,10 @@ func validateLiveID[T any](ctx context.Context, name string, id *int, list func(
 		}
 	}
 	return fmt.Errorf("redmine: %s %d is not available", name, *id)
+}
+
+func validPositiveActionID(id int) bool {
+	return id > 0 && id <= maxSafeActionID
 }
 
 type issueUploadRequest struct {
