@@ -9,6 +9,8 @@ package connection
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -434,4 +436,12 @@ func recordFromMap(m map[string]any) *Record {
 
 func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
 
-func newRevision() string { return fmt.Sprintf("%d", time.Now().UnixNano()) }
+func newRevision() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err == nil {
+		return hex.EncodeToString(buf)
+	}
+	// crypto/rand failure is exceptionally rare; retain a non-empty revision
+	// rather than failing a validated connection solely while recording state.
+	return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+}

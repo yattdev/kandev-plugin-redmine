@@ -259,6 +259,23 @@ func TestHandleAction_WorkflowsList_ReturnsWorkflowsWithSteps(t *testing.T) {
 	require.Len(t, steps, 2)
 }
 
+func TestApplyWatchMapping_BackfillsLegacyWatchPlacementAndAttributes(t *testing.T) {
+	statusID := 5
+	legacy := watch.Watch{ID: "legacy", WorkspaceID: "ws-1", ProjectID: 1, StatusID: &statusID}
+	require.True(t, needsWatchBackfill(legacy))
+	backfilled := applyWatchMapping(legacy, fieldmapping.Mapping{
+		WorkflowID: "wf-secondary",
+		Statuses:   []fieldmapping.StatusMapping{{RedmineStatusID: 5, WorkflowStepID: "step-triage"}},
+		Trackers:   []fieldmapping.TrackerMapping{{RedmineTrackerID: 3, TaskLabel: "bug"}},
+		Priorities: []fieldmapping.PriorityMapping{{RedminePriorityID: 4, TaskPriority: "high"}},
+	})
+	require.Equal(t, "wf-secondary", backfilled.WorkflowID)
+	require.Equal(t, "step-triage", backfilled.WorkflowStepID)
+	require.Equal(t, "bug", backfilled.TrackerLabels[3])
+	require.Equal(t, "high", backfilled.PriorityMappings[4])
+	require.False(t, needsWatchBackfill(backfilled))
+}
+
 func TestOnEvent_TaskMoved_AutoWritebackEnabled_PushesStatus(t *testing.T) {
 	p, _ := newTestPlugin()
 

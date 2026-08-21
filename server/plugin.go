@@ -148,12 +148,42 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 	if err != nil {
 		return err
 	}
+	mapping, mappingFound, err := p.fieldmappingSvc.Get(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
 	for _, w := range watches {
+		if mappingFound && needsWatchBackfill(w) {
+			w = applyWatchMapping(w, mapping)
+			if err := p.watchSvc.UpdateWatch(ctx, w); err != nil {
+				return err
+			}
+		}
 		if err := p.watchSvc.Poll(ctx, w, issuesSvc); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func needsWatchBackfill(w watch.Watch) bool {
+	return w.WorkflowID == "" || (w.StatusID != nil && w.WorkflowStepID == "") || w.TrackerLabels == nil || w.PriorityMappings == nil
+}
+
+func applyWatchMapping(w watch.Watch, mapping fieldmapping.Mapping) watch.Watch {
+	w.WorkflowID = mapping.WorkflowID
+	if w.StatusID != nil {
+		w.WorkflowStepID, _ = mapping.WorkflowStepForStatus(*w.StatusID)
+	}
+	w.TrackerLabels = make(map[int]string, len(mapping.Trackers))
+	for _, tracker := range mapping.Trackers {
+		w.TrackerLabels[tracker.RedmineTrackerID] = tracker.TaskLabel
+	}
+	w.PriorityMappings = make(map[int]string, len(mapping.Priorities))
+	for _, priority := range mapping.Priorities {
+		w.PriorityMappings[priority.RedminePriorityID] = priority.TaskPriority
+	}
+	return w
 }
 
 // OnEvent handles task.moved for near-real-time outbound write-back (see
