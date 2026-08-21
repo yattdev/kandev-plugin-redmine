@@ -54,10 +54,12 @@ func redmineFixtureServer(t *testing.T, onPut func(statusID any)) *httptest.Serv
 	return srv
 }
 
-func newTestPlugin() (*redminePlugin, *fakeHost) {
+func newTestPlugin(t testing.TB) (*redminePlugin, *fakeHost) {
+	t.Helper()
 	p := &redminePlugin{}
 	host := newFakeHost()
 	p.SetHost(host)
+	t.Cleanup(p.stop)
 	return p, host
 }
 
@@ -77,7 +79,7 @@ func handle(t *testing.T, p *redminePlugin, key, workspaceID, taskID string, bod
 }
 
 func TestHandleAction_ConnectionSaveThenGet_RoundTrips(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := redmineFixtureServer(t, nil)
 
 	saved := handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
@@ -88,7 +90,7 @@ func TestHandleAction_ConnectionSaveThenGet_RoundTrips(t *testing.T) {
 }
 
 func TestHandleAction_ConnectionSave_InvalidKey_ReturnsClassifiedError(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
@@ -126,7 +128,7 @@ func TestHandleAction_IssueUploadAndCreateExposeFullWriteContract(t *testing.T) 
 		}
 	}))
 	defer srv.Close()
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
 	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
 	upload := handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "note.txt", "content_type": "text/plain", "content_base64": base64.StdEncoding.EncodeToString([]byte("hello"))})
@@ -178,7 +180,7 @@ func TestHandleAction_IssueUpdateValidatesIDAndSendsFullPayload(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
 	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
 
@@ -215,7 +217,7 @@ func TestHandleAction_IssueUpdatePreservesOmittedAndExplicitEmptyDescription(t *
 		}
 	}))
 	defer srv.Close()
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
 	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
 
@@ -230,7 +232,7 @@ func TestHandleAction_IssueUpdatePreservesOmittedAndExplicitEmptyDescription(t *
 }
 
 func TestHandleAction_IssueWriteRejectsUntrustedBoundaries(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/users/current.json":
@@ -287,7 +289,7 @@ func TestHandleAction_IssueWriteRejectsUntrustedBoundaries(t *testing.T) {
 }
 
 func TestHandleAction_IssueUploadRejectsInvalidInput(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	out := handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "", "content_base64": "aGVsbG8="})
 	require.Contains(t, out["error"], "filename")
 	out = handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "x", "content_base64": "not-base64"})
@@ -301,7 +303,7 @@ func TestHandleAction_IssueUploadRejectsInvalidInput(t *testing.T) {
 }
 
 func TestHandleAction_ProjectsSaveThenList_PersistsSelection(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := redmineFixtureServer(t, nil)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
 
@@ -336,7 +338,7 @@ func TestHandleAction_ProjectsSaveValidatesPaginatedVisibleIDsAndDedupes(t *test
 		}
 	}))
 	defer srv.Close()
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
 	handle(t, p, "projects.save", "ws-1", "", map[string]any{"project_ids": []int{250, 1, 250}})
 	got := handle(t, p, "projects.list", "ws-1", "", nil)
@@ -346,7 +348,7 @@ func TestHandleAction_ProjectsSaveValidatesPaginatedVisibleIDsAndDedupes(t *test
 }
 
 func TestHandleAction_LinkSetThenGet_ResolvesAndPersistsLink(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := redmineFixtureServer(t, nil)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
 	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
@@ -360,7 +362,7 @@ func TestHandleAction_LinkSetThenGet_ResolvesAndPersistsLink(t *testing.T) {
 }
 
 func TestHandleAction_LinkSetRejectsIssueOutsideSelectedProjects(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := redmineFixtureServer(t, nil)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
 	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{2}))
@@ -372,7 +374,7 @@ func TestHandleAction_LinkSetRejectsIssueOutsideSelectedProjects(t *testing.T) {
 }
 
 func TestHandleAction_LinkSetRejectsUntrustedIssueReferences(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := redmineFixtureServer(t, nil)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
 	for _, reference := range []string{"abc42", "#0", "https://other.example/issues/42", srv.URL + "/projects/42", srv.URL + "/issues/999999999999999999999999"} {
@@ -393,7 +395,7 @@ func TestParseIssueReferenceAcceptsConfiguredSubpathOnly(t *testing.T) {
 }
 
 func TestHandleAction_LinkSetStatusValidatesLiveStatus(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	var pushed any
 	srv := redmineFixtureServer(t, func(statusID any) { pushed = statusID })
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
@@ -409,7 +411,7 @@ func TestHandleAction_LinkSetStatusValidatesLiveStatus(t *testing.T) {
 }
 
 func TestHandleAction_LinkUnset_RemovesLink(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := redmineFixtureServer(t, nil)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
 	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
@@ -421,7 +423,7 @@ func TestHandleAction_LinkUnset_RemovesLink(t *testing.T) {
 }
 
 func TestOnEvent_TaskMoved_PushesWritebackForLinkedTaskWithMappedStep(t *testing.T) {
-	p, host := newTestPlugin()
+	p, host := newTestPlugin(t)
 
 	var pushedStatus any
 	srv := redmineFixtureServer(t, func(statusID any) { pushedStatus = statusID })
@@ -444,7 +446,7 @@ func TestOnEvent_TaskMoved_PushesWritebackForLinkedTaskWithMappedStep(t *testing
 }
 
 func TestHandleAction_WorkflowsList_ReturnsWorkflowsWithSteps(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	out := handle(t, p, "workflows.list", "ws-1", "", nil)
 	workflows, ok := out["workflows"].([]any)
 	require.True(t, ok)
@@ -458,7 +460,7 @@ func TestHandleAction_WorkflowsList_ReturnsWorkflowsWithSteps(t *testing.T) {
 }
 
 func TestHandleAction_WatchesRejectForgedInvalidOrUnselectedInputs(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	for _, body := range []map[string]any{
 		{"project_id": 0, "max_inflight_tasks": 0},
 		{"project_id": 1, "max_inflight_tasks": -1},
@@ -490,7 +492,7 @@ func TestHandleAction_WatchesValidateLiveFiltersAndSelectedProject(t *testing.T)
 		}
 	}))
 	defer srv.Close()
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
 	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
 	require.NoError(t, p.fieldmappingSvc.Save(context.Background(), "ws-1", fieldmapping.Mapping{WorkflowID: "wf-1"}))
@@ -522,7 +524,7 @@ func TestHandleAction_FieldMappingSaveValidatesAndNormalizesLiveValues(t *testin
 		}
 	}))
 	defer srv.Close()
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
 	base := map[string]any{"workflow_id": "wf-1", "statuses": []any{map[string]any{"redmine_status_id": 1, "redmine_name": "forged", "is_closed": true, "workflow_step_id": "step-done"}}, "trackers": []any{map[string]any{"redmine_tracker_id": 2, "redmine_name": "forged", "task_label": "  bug  "}}, "priorities": []any{map[string]any{"redmine_priority_id": 3, "redmine_name": "forged", "task_priority": "high"}}}
 	require.Equal(t, true, handle(t, p, "fieldmapping.save", "ws-1", "", base)["saved"])
@@ -540,7 +542,7 @@ func TestHandleAction_FieldMappingSaveValidatesAndNormalizesLiveValues(t *testin
 }
 
 func TestHandleAction_SyncOptionsGetRoundTripsAndPreservesOtherToggle(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	handle(t, p, "syncoptions.save", "ws-1", "", map[string]any{"auto_status_writeback": true, "sync_title_description": false})
 	loaded := handle(t, p, "syncoptions.get", "ws-1", "", nil)
 	require.Equal(t, true, loaded["auto_status_writeback"])
@@ -570,7 +572,7 @@ func TestApplyWatchMapping_BackfillsLegacyWatchPlacementAndAttributes(t *testing
 }
 
 func TestOnEvent_TaskMoved_AutoWritebackEnabled_PushesStatus(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 
 	var pushedStatus any
 	srv := redmineFixtureServer(t, func(statusID any) { pushedStatus = statusID })
@@ -592,7 +594,7 @@ func TestOnEvent_TaskMoved_AutoWritebackEnabled_PushesStatus(t *testing.T) {
 }
 
 func TestOnEvent_WorkspaceDeleted_CleansPluginStateAfterTaskCascade(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := redmineFixtureServer(t, nil)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
 	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
@@ -615,7 +617,7 @@ func TestOnEvent_WorkspaceDeleted_CleansPluginStateAfterTaskCascade(t *testing.T
 }
 
 func TestOnEvent_TaskDeletedIdempotentlyRemovesLink(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	require.NoError(t, p.tasklinkSvc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
 	event := &pluginsdk.Event{EventID: "deleted", EventType: "task.deleted", Payload: map[string]any{"task_id": "task-1"}}
 	require.NoError(t, p.OnEvent(context.Background(), event))

@@ -11,21 +11,21 @@ import (
 )
 
 func TestSearchEntityReferences_WrongSource_ReturnsNoCandidates(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	resp, err := p.SearchEntityReferences(context.Background(), &pluginsdk.SearchEntityReferencesRequest{Source: "something-else"})
 	require.NoError(t, err)
 	require.Empty(t, resp.Candidates)
 }
 
 func TestSearchEntityReferences_NotConnected_ReturnsNoCandidates(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	resp, err := p.SearchEntityReferences(context.Background(), &pluginsdk.SearchEntityReferencesRequest{Source: referenceSource, WorkspaceID: "ws-1", Query: "bug"})
 	require.NoError(t, err)
 	require.Empty(t, resp.Candidates)
 }
 
 func TestSearchEntityReferences_Connected_ReturnsCandidates(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/users/current.json":
@@ -49,7 +49,7 @@ func TestSearchEntityReferences_Connected_ReturnsCandidates(t *testing.T) {
 }
 
 func TestSearchEntityReferences_ScopesProjectsDedupesAndAppliesGlobalLimit(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	var projectIDs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -80,7 +80,7 @@ func TestSearchEntityReferences_ScopesProjectsDedupesAndAppliesGlobalLimit(t *te
 }
 
 func TestAuthorizeEntityReference_SubmissionPurpose_ReVerifiesIssueExists(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	var issueExists bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -121,7 +121,7 @@ func TestAuthorizeEntityReference_SubmissionPurpose_ReVerifiesIssueExists(t *tes
 }
 
 func TestAuthorizeEntityReference_SubmissionRejectsUnselectedAndUntrustedReferences(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/redmine/users/current.json":
@@ -146,7 +146,7 @@ func TestAuthorizeEntityReference_SubmissionRejectsUnselectedAndUntrustedReferen
 }
 
 func TestAuthorizeEntityReference_SearchPurpose_AllowsWithoutReverify(t *testing.T) {
-	p, _ := newTestPlugin()
+	p, _ := newTestPlugin(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"user":{"id":1}}`))

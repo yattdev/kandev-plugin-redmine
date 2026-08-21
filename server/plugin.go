@@ -5,11 +5,11 @@
 //
 // redminePlugin composes one Service per domain package (connection,
 // projects, fieldmapping, tasklink, sync, watch) and wires them together:
-// SetHost is the plugin's only lifecycle hook (called once, after the
+// SetHost is the plugin's only public lifecycle hook (called once, after the
 // go-plugin broker connection completes), so it both injects the Host into
-// every service and starts the plugin's own background loops — there is no
-// host healthpoll/watchreset equivalent for plugins (plan Risks), so this
-// plugin owns polling entirely.
+// every service and starts the plugin's own background loops. The SDK has no
+// public shutdown callback: production shutdown is process termination; the
+// internal stop method below exists for tests and controlled in-process use.
 package main
 
 import (
@@ -37,9 +37,12 @@ const syncPollInterval = 60 * time.Second
 type redminePlugin struct {
 	pluginsdk.UnimplementedPlugin
 
-	mu    sync.Mutex
-	ready bool
-	wg    sync.WaitGroup
+	mu       sync.Mutex
+	ready    bool
+	wg       sync.WaitGroup
+	ctx      context.Context
+	cancel   context.CancelFunc
+	stopDone chan struct{}
 
 	connectionSvc   *connection.Service
 	projectsSvc     *projects.Service
@@ -63,7 +66,7 @@ func (p *redminePlugin) SetHost(host pluginsdk.Host) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.ready {
+	if p.ready || p.stopDone != nil {
 		return
 	}
 
@@ -76,10 +79,42 @@ func (p *redminePlugin) SetHost(host pluginsdk.Host) {
 	p.healthPoller = connection.NewHealthPoller(p.connectionSvc)
 	p.ready = true
 
-	ctx := context.Background()
-	p.healthPoller.Start(ctx)
+	p.ctx, p.cancel = context.WithCancel(context.Background())
+	p.healthPoller.Start(p.ctx)
 	p.wg.Add(1)
-	go p.runSyncLoop(ctx)
+	go p.runSyncLoop(p.ctx)
+}
+
+// stop terminates plugin-owned goroutines. It is intentionally not part of
+// the public SDK contract: Kandev ends a production plugin by terminating its
+// subprocess. Tests call stop through t.Cleanup so in-process test plugins do
+// not outlive their test.
+func (p *redminePlugin) stop() {
+	p.mu.Lock()
+	if p.stopDone != nil {
+		done := p.stopDone
+		p.mu.Unlock()
+		<-done
+		return
+	}
+	if !p.ready {
+		p.mu.Unlock()
+		return
+	}
+	done := make(chan struct{})
+	p.stopDone = done
+	cancel := p.cancel
+	healthPoller := p.healthPoller
+	p.ready = false
+	p.mu.Unlock()
+
+	cancel()
+	healthPoller.Stop()
+	p.wg.Wait()
+
+	p.mu.Lock()
+	close(done)
+	p.mu.Unlock()
 }
 
 func (p *redminePlugin) runSyncLoop(ctx context.Context) {

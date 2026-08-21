@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
 	"github.com/stretchr/testify/require"
@@ -135,12 +136,14 @@ func TestRedminePlugin_HostRoundTrip(t *testing.T) {
 
 	host := newFakeHost()
 	p.SetHost(host)
+	t.Cleanup(p.stop)
 	require.Same(t, pluginsdk.Host(host), p.Host())
 }
 
 func TestRedminePlugin_OnEvent_IgnoresNonTaskMovedEvents(t *testing.T) {
 	p := &redminePlugin{}
 	p.SetHost(newFakeHost())
+	t.Cleanup(p.stop)
 	err := p.OnEvent(context.Background(), &pluginsdk.Event{EventID: "e1", EventType: "task.created"})
 	require.NoError(t, err)
 }
@@ -156,4 +159,43 @@ func TestRedminePlugin_HandleWebhook_UnimplementedWithoutOverride(t *testing.T) 
 	resp, err := p.HandleWebhook(context.Background(), &pluginsdk.WebhookRequest{WebhookKey: "ping", Method: "POST"})
 	require.NoError(t, err)
 	require.Equal(t, int32(404), resp.Status)
+}
+
+func TestRedminePlugin_StopTerminatesOwnedLoops(t *testing.T) {
+	p := &redminePlugin{}
+	p.SetHost(newFakeHost())
+	p.stop()
+
+	p.mu.Lock()
+	ready := p.ready
+	done := p.stopDone
+	p.mu.Unlock()
+	require.False(t, ready)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("plugin stop did not wait for owned loops")
+	}
+}
+
+func TestRedminePlugin_StopIsConcurrentAndIdempotent(t *testing.T) {
+	p := &redminePlugin{}
+	p.SetHost(newFakeHost())
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.stop()
+		}()
+	}
+	finished := make(chan struct{})
+	go func() { wg.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent stop calls deadlocked")
+	}
+	// A later stop observes the closed stop channel and is a no-op.
+	p.stop()
 }
