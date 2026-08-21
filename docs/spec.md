@@ -22,6 +22,13 @@ workspace's state.
   the host-verified action context for workspace and task scope.
 - Redmine has no core webhooks. Health, inbound synchronization, and watches
   are plugin-owned polling work.
+- A Redmine administrator account is not required. A normal user's API key
+  lists only projects and issues visible to that user; write operations depend
+  on that user's ordinary project-role permissions. Admin-only custom-field
+  listing may return 403 and must use the issue-derived fallback.
+- The workspace enable preference is independent of the connection. Disabling
+  pauses background polling and automatic write-back without deleting the
+  workspace secret or saved configuration.
 
 ## Required behavior
 
@@ -30,8 +37,10 @@ workspace's state.
 2. List all visible projects using Redmine's `offset`/`limit` pagination and
    persist the selected project IDs.
 3. Fetch statuses, trackers, priorities, and custom fields from the connected
-   Redmine instance rather than hardcoding instance-specific values. If custom
-   fields cannot be listed, derive them from recent issues.
+   Redmine instance rather than hardcoding instance-specific values. The user
+   selects a workspace workflow, explicitly adds live Redmine statuses, and
+   selects a Kandev step for each added status. If custom fields cannot be
+   listed, derive them from recent issues.
 4. Create and update issues, including Redmine's upload-token attachment flow.
 5. Persist task-to-issue links, support unlinking, and expose the shared
    Kandev task-link dialog.
@@ -59,6 +68,7 @@ workspace's state.
 | Scenario | Plugin entry point | Host contract | Automated evidence |
 | --- | --- | --- | --- |
 | Connection validation, rotation, revocation, redaction, workspace isolation | `connection.save/get/disconnect` | verified workspace action context; secrets and state RPCs | `internal/connection/connection_test.go`, `server/actions_test.go` |
+| Workspace enable/disable without credential loss | `integration.enabled.get/save` | verified workspace action context; state RPC | `internal/connection/connection_test.go`, `server/actions_test.go`, `ui/e2e/live-redmine.spec.ts` |
 | Health and retry behavior | `connection.HealthPoller` | state/secrets RPCs | `internal/connection/healthpoll_test.go`, `internal/redmineclient/client_test.go` |
 | Project pagination and selected projects | `projects.list/save` | workspace action context; state RPC | `internal/projects/projects_test.go` |
 | Live field mapping and custom-field fallback | `fieldmapping.get/save` | workspace action context; workflows read RPC | `internal/fieldmapping/fieldmapping_test.go` |

@@ -12,11 +12,21 @@ verification trace is [docs/spec.md](docs/spec.md).
   The plugin uses a dot-safe composed key (`redmine.<workspace_id>.api_key`).
   Existing v0.1 plugin-encrypted values are dual-read and migrated on read;
   new values never use plugin-side encryption.
+- **No Redmine administrator required** — a normal Redmine user API key is
+  sufficient. Project and issue lists contain only resources that user can
+  access. Issue creation, edits, and status write-back additionally require
+  the corresponding project-role permissions. If the admin-only custom-field
+  endpoint returns 403, fields are derived from issues visible to that user.
+- **Workspace enable switch** — each Kandev workspace can pause Redmine
+  polling and automatic write-back without deleting its connection, secret,
+  mappings, or watcher definitions.
 - **Own health polling** — no host `healthpoll` equivalent exists for plugins;
   this plugin runs its own ~90s jittered probe per connected workspace.
 - **Project and field mapping** — statuses, trackers, and priorities are always
-  fetched live from the instance and mapped to kandev workflow steps, labels,
-  and priorities; nothing is hardcoded.
+  fetched live from the instance. Users choose a workspace workflow, add only
+  the Redmine statuses they want to map, and select a Kandev step for each;
+  tracker labels and task priorities remain configurable and nothing is
+  hardcoded.
 - **Issue read/write** — always sends `status_id=*` (Redmine defaults to
   open-only), with attachments via the two-step upload-token flow.
 - **Task linking** — `registerTaskAction({placement:"link"})` +
