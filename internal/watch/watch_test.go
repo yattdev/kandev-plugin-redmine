@@ -12,6 +12,8 @@ import (
 	"kandev-plugin-redmine/internal/redmineclient"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func newIssuesService(t *testing.T, handler http.HandlerFunc) *issues.Service {
@@ -65,6 +67,54 @@ func TestPoll_RacingDeleteLeavesNoOwnedTaskOrIndex(t *testing.T) {
 	tasks, err := svc.watchTasks(context.Background(), "ws-1", w.ID)
 	require.NoError(t, err)
 	require.Empty(t, tasks)
+}
+
+func TestPoll_RecordFailureCompensatesCreatedTaskAndRetryCreatesOnce(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	host.setStateErr = fmt.Errorf("state unavailable")
+	issuesSvc := newIssuesService(t, oneIssuePage(42, "New issue"))
+	require.Error(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Empty(t, host.tasks)
+	require.Len(t, host.deletedTaskIDs(), 1)
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Len(t, host.tasks, 1)
+}
+
+func TestPoll_ThrottlePropagatesTransientTaskReadFailure(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true, MaxInflightTasks: 1})
+	require.NoError(t, err)
+	require.NoError(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "first"))))
+	host.getTaskErr = fmt.Errorf("temporary host failure")
+	require.ErrorContains(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(99, "second"))), "reading task")
+	host.getTaskErr = status.Error(codes.NotFound, "gone")
+	require.NoError(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(99, "second"))))
+}
+
+func TestPoll_RacingClearWorkspaceLeavesNoOwnedTaskOrWatch(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	issuesSvc := newIssuesService(t, oneIssuePage(42, "New issue"))
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); errs <- svc.Poll(context.Background(), w, issuesSvc) }()
+	go func() { defer wg.Done(); errs <- svc.ClearWorkspace(context.Background(), "ws-1") }()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Empty(t, host.tasks)
+	watches, err := svc.ListWatches(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.Empty(t, watches)
 }
 
 func oneIssuePage(id int, subject string) http.HandlerFunc {

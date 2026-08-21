@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -18,6 +19,8 @@ import (
 	"kandev-plugin-redmine/internal/issues"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // metadataKeyWatchID is the single source of truth for the task-metadata key
@@ -297,7 +300,15 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 	if err != nil {
 		return fmt.Errorf("watch: creating task for issue %d: %w", issue.ID, err)
 	}
-	return s.recordWatchTask(ctx, w.WorkspaceID, w.ID, issue.ID, task.ID)
+	if err := s.recordWatchTask(ctx, w.WorkspaceID, w.ID, issue.ID, task.ID); err != nil {
+		if manager, ok := pluginsdk.PluginOwnedTaskTrees(s.host); ok {
+			if _, cleanupErr := manager.Delete(ctx, task.ID); cleanupErr != nil {
+				return fmt.Errorf("watch: recording task %s: %w", task.ID, errors.Join(err, fmt.Errorf("compensating task delete: %w", cleanupErr)))
+			}
+		}
+		return fmt.Errorf("watch: recording task %s: %w", task.ID, err)
+	}
+	return nil
 }
 
 // inflightCount counts this watch's created tasks that are not yet in a
@@ -315,7 +326,10 @@ func (s *Service) inflightCount(ctx context.Context, w Watch) (int, error) {
 	for _, taskID := range tasks {
 		task, err := s.host.Tasks().Get(ctx, taskID)
 		if err != nil {
-			continue // deleted/not found: does not count as inflight
+			if status.Code(err) == codes.NotFound {
+				continue // deleted task does not count as inflight
+			}
+			return 0, fmt.Errorf("watch: reading task %s for throttle: %w", taskID, err)
 		}
 		if task.Metadata[metadataKeyWatchID] != w.ID {
 			continue

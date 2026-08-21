@@ -22,6 +22,8 @@ type fakeHost struct {
 	deleted     []string
 	creates     []pluginsdk.CreateTaskInput
 	getStateErr error
+	setStateErr error
+	getTaskErr  error
 }
 
 func newFakeHost() *fakeHost {
@@ -43,6 +45,11 @@ func (h *fakeHost) GetState(_ context.Context, scope, scopeID, k string) (map[st
 func (h *fakeHost) SetState(_ context.Context, scope, scopeID, k string, value map[string]any) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.setStateErr != nil {
+		err := h.setStateErr
+		h.setStateErr = nil
+		return err
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		panic(err)
@@ -119,6 +126,9 @@ func (r fakeTaskReader) Create(_ context.Context, in pluginsdk.CreateTaskInput) 
 func (r fakeTaskReader) Get(_ context.Context, id string) (*pluginsdk.Task, error) {
 	r.host.mu.Lock()
 	defer r.host.mu.Unlock()
+	if r.host.getTaskErr != nil {
+		return nil, r.host.getTaskErr
+	}
 	task, ok := r.host.tasks[id]
 	if !ok {
 		return nil, fmt.Errorf("fakeHost: task %s not found", id)
