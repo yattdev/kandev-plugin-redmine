@@ -266,6 +266,7 @@ func TestHandleAction_IssueWriteRejectsUntrustedBoundaries(t *testing.T) {
 		{"project_id": 1, "subject": "new", "custom_fields": []any{map[string]any{"id": maxSafeActionID + 1}}},
 		{"project_id": 1, "subject": "new", "custom_fields": []any{map[string]any{"id": 1}, map[string]any{"id": 1}}},
 		{"project_id": 1, "subject": "new", "uploads": []any{map[string]any{"token": "", "filename": "x", "content_type": "text/plain"}}},
+		{"project_id": 1, "subject": "new", "uploads": []any{map[string]any{"token": " token", "filename": "x", "content_type": "text/plain"}}},
 		{"project_id": 1, "subject": "new", "uploads": []any{map[string]any{"token": "t", "filename": "x", "content_type": "not a media type;"}}},
 	} {
 		require.NotEmpty(t, handle(t, p, "issues.create", "ws-1", "", body)["error"])

@@ -15,7 +15,7 @@ import (
 )
 
 const maxAttachmentBytes = 700 * 1024
-const maxSafeActionID = int(1<<53 - 1)
+const maxSafeActionID int64 = 1<<53 - 1
 
 type issueWriteRequest struct {
 	ProjectID    *int                      `json:"project_id"`
@@ -195,7 +195,7 @@ func validateIssueFields(ctx context.Context, client *redmineclient.Client, trac
 		if strings.TrimSpace(upload.Token) == "" || strings.TrimSpace(upload.Filename) == "" {
 			return fmt.Errorf("redmine: uploads require token and filename")
 		}
-		if strings.ContainsAny(upload.Token, "\r\n") || strings.ContainsAny(upload.Filename, "\r\n") || upload.Filename != strings.TrimSpace(upload.Filename) {
+		if strings.ContainsAny(upload.Token, "\r\n") || upload.Token != strings.TrimSpace(upload.Token) || strings.ContainsAny(upload.Filename, "\r\n") || upload.Filename != strings.TrimSpace(upload.Filename) {
 			return fmt.Errorf("redmine: upload filename or token is invalid")
 		}
 		contentType := upload.ContentType
@@ -229,7 +229,7 @@ func validateLiveID[T any](ctx context.Context, name string, id *int, list func(
 }
 
 func validPositiveActionID(id int) bool {
-	return id > 0 && id <= maxSafeActionID
+	return id > 0 && int64(id) <= maxSafeActionID
 }
 
 type issueUploadRequest struct {
