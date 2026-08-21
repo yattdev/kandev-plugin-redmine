@@ -82,3 +82,12 @@ func (s *Service) GetSelection(ctx context.Context, workspaceID string) ([]int, 
 	}
 	return ids, nil
 }
+
+// Clear removes the workspace's selected-project state. DeleteState is
+// idempotent in the host contract, making cleanup safe to retry.
+func (s *Service) Clear(ctx context.Context, workspaceID string) error {
+	if err := s.host.DeleteState(ctx, stateScope, workspaceID, stateKey); err != nil {
+		return fmt.Errorf("projects: clearing selection: %w", err)
+	}
+	return nil
+}

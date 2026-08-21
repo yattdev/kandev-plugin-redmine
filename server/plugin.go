@@ -167,13 +167,26 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 // fetching every linked task's current step on every tick; OnEvent is the
 // intended primary path and is expected to be reliable in the common case).
 func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
-	if e == nil || e.EventType != "task.moved" {
+	if e == nil {
 		return nil
 	}
 	p.mu.Lock()
 	ready := p.ready
 	p.mu.Unlock()
 	if !ready {
+		return nil
+	}
+	if e.EventType == "workspace.deleted" {
+		workspaceID := e.WorkspaceID
+		if workspaceID == "" {
+			workspaceID, _ = e.Payload["workspace_id"].(string)
+		}
+		if workspaceID == "" {
+			return nil
+		}
+		return p.clearWorkspace(ctx, workspaceID)
+	}
+	if e.EventType != "task.moved" {
 		return nil
 	}
 
@@ -213,4 +226,23 @@ func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
 	}
 
 	return p.syncSvc.PushWriteback(ctx, taskID, toStepID, mapping, issues.New(client), opts)
+}
+
+func (p *redminePlugin) clearWorkspace(ctx context.Context, workspaceID string) error {
+	if err := p.watchSvc.ClearWorkspace(ctx, workspaceID); err != nil {
+		return fmt.Errorf("redmine: clearing watches: %w", err)
+	}
+	if err := p.tasklinkSvc.ClearWorkspace(ctx, workspaceID); err != nil {
+		return fmt.Errorf("redmine: clearing links: %w", err)
+	}
+	if err := p.projectsSvc.Clear(ctx, workspaceID); err != nil {
+		return err
+	}
+	if err := p.fieldmappingSvc.Clear(ctx, workspaceID); err != nil {
+		return err
+	}
+	if err := p.syncSvc.Clear(ctx, workspaceID); err != nil {
+		return err
+	}
+	return p.connectionSvc.Disconnect(ctx, workspaceID)
 }

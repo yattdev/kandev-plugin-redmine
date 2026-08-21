@@ -31,8 +31,9 @@ type Issue struct {
 }
 
 type CustomFieldValue struct {
-	ID    int `json:"id"`
-	Value any `json:"value"`
+	ID    int    `json:"id"`
+	Name  string `json:"name,omitempty"`
+	Value any    `json:"value"`
 }
 
 type Journal struct {
@@ -173,13 +174,22 @@ type IssueWrite struct {
 	Subject      string
 	Description  string
 	CustomFields []CustomFieldValue
-	// UploadTokens are tokens returned by UploadAttachment, included in the
-	// write payload's "uploads" array to attach files to the issue.
-	UploadTokens []string
+	// Uploads are the token and file metadata returned/provided by Redmine's
+	// two-step upload flow. Redmine requires filename on both the upload query
+	// and the issue write payload.
+	Uploads []Upload
 }
 
 type uploadRef struct {
-	Token string `json:"token"`
+	Token       string `json:"token"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type,omitempty"`
+}
+
+type Upload struct {
+	Token       string
+	Filename    string
+	ContentType string
 }
 
 type issueWriteBody struct {
@@ -198,9 +208,9 @@ type issueWritePayload struct {
 }
 
 func (w IssueWrite) toBody() issueWriteBody {
-	uploads := make([]uploadRef, len(w.UploadTokens))
-	for i, token := range w.UploadTokens {
-		uploads[i] = uploadRef{Token: token}
+	uploads := make([]uploadRef, len(w.Uploads))
+	for i, upload := range w.Uploads {
+		uploads[i] = uploadRef{Token: upload.Token, Filename: upload.Filename, ContentType: upload.ContentType}
 	}
 	return issueWriteBody{
 		ProjectID:    w.ProjectID,
@@ -239,13 +249,19 @@ type uploadEnvelope struct {
 }
 
 // UploadAttachment performs the two-step attachment flow's first step: POST
-// /uploads.json with the raw file bytes and Content-Type:
+// /uploads.json?filename=<name> with the raw file bytes and Content-Type:
 // application/octet-stream, returning the token to pass as one of
-// IssueWrite.UploadTokens on a following CreateIssue/UpdateIssue call.
-func (s *Service) UploadAttachment(ctx context.Context, content io.Reader) (string, error) {
-	var out uploadEnvelope
-	if err := s.client.PostBinary(ctx, "/uploads.json", "application/octet-stream", content, &out); err != nil {
-		return "", err
+// IssueWrite.Uploads on a following CreateIssue/UpdateIssue call.
+func (s *Service) UploadAttachment(ctx context.Context, filename, contentType string, content io.Reader) (Upload, error) {
+	if filename == "" {
+		return Upload{}, fmt.Errorf("issues: attachment filename is required")
 	}
-	return out.Upload.Token, nil
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	var out uploadEnvelope
+	if err := s.client.PostBinary(ctx, "/uploads.json", contentType, content, map[string]string{"filename": filename}, &out); err != nil {
+		return Upload{}, err
+	}
+	return Upload{Token: out.Upload.Token, Filename: filename, ContentType: contentType}, nil
 }

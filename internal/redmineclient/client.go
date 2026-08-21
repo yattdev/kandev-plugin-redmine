@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 )
 
 // Client talks to one Redmine instance under one API key. It holds no
@@ -22,10 +24,45 @@ type Client struct {
 	httpClient *http.Client
 }
 
+const defaultHTTPTimeout = 15 * time.Second
+
+// NormalizeBaseURL accepts only an HTTP(S) origin or an HTTP(S) origin with a
+// Redmine subpath. Credentials, queries and fragments are never meaningful
+// for an API base URL and accepting them risks credential confusion.
+func NormalizeBaseURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("redmineclient: base URL must be an absolute http(s) URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("redmineclient: base URL scheme must be http or https")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("redmineclient: base URL must not include credentials, query, or fragment")
+	}
+	u.Path = strings.TrimRight(u.EscapedPath(), "/")
+	u.RawPath = ""
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
+func defaultHTTPClient() *http.Client {
+	client := &http.Client{Timeout: defaultHTTPTimeout}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) == 0 || req.URL.Scheme != via[0].URL.Scheme || req.URL.Host != via[0].URL.Host {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+	return client
+}
+
 // New builds a Client. httpClient must not be nil; callers own its timeout
 // and transport configuration (proxy env vars are honored for free by Go's
 // default transport, per the spec's Network section).
 func New(baseURL, apiKey string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = defaultHTTPClient()
+	}
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		apiKey:     apiKey,

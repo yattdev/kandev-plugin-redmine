@@ -96,3 +96,18 @@ func TestRecordPushedTitleAndDescription_RoundTrips(t *testing.T) {
 	require.Equal(t, "New title", link.LastPushedTitle)
 	require.NotEmpty(t, link.LastPushedDescriptionHash)
 }
+
+func TestSet_RelinkRemovesOldIndexAndRejectsDuplicateIssue(t *testing.T) {
+	svc := New(newFakeHost())
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 43, "url"))
+	_, found, err := svc.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.False(t, found)
+
+	require.Error(t, svc.Set(context.Background(), "task-2", "ws-1", 43, "url"))
+	taskID, found, err := svc.TaskIDForIssue(context.Background(), "ws-1", 43)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "task-1", taskID)
+}

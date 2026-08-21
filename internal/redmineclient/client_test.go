@@ -89,3 +89,26 @@ func TestValidateCredentials_UnexpectedStatus_ReturnsDistinctError(t *testing.T)
 	require.Equal(t, redmineclient.ErrKindUnexpected, apiErr.Kind)
 	require.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
 }
+
+func TestNormalizeBaseURL_RejectsUnsafeFormsAndPreservesSubpath(t *testing.T) {
+	got, err := redmineclient.NormalizeBaseURL(" https://redmine.example/redmine/ ")
+	require.NoError(t, err)
+	require.Equal(t, "https://redmine.example/redmine", got)
+	for _, raw := range []string{"ftp://redmine.example", "https://user:pass@redmine.example", "https://redmine.example/?x=1", "https://redmine.example/#fragment", "/relative"} {
+		_, err := redmineclient.NormalizeBaseURL(raw)
+		require.Error(t, err, raw)
+	}
+}
+
+func TestDefaultClient_RefusesCrossOriginRedirectWithoutFollowingIt(t *testing.T) {
+	targetHit := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { targetHit = true }))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, http.StatusFound) }))
+	defer redirector.Close()
+
+	c := redmineclient.New(redirector.URL, "secret", nil)
+	_, err := c.ValidateCredentials(context.Background())
+	require.Error(t, err)
+	require.False(t, targetHit)
+}

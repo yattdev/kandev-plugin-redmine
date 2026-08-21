@@ -63,7 +63,7 @@ type Service struct {
 }
 
 func New(host pluginsdk.Host) *Service {
-	return &Service{host: host, httpClient: http.DefaultClient}
+	return &Service{host: host}
 }
 
 // Connect validates baseURL+apiKey against GET /users/current.json. On
@@ -80,8 +80,12 @@ func (s *Service) Connect(ctx context.Context, workspaceID, baseURL, apiKey stri
 	if baseURL == "" || apiKey == "" {
 		return nil, errors.New("connection: base url and api key are required")
 	}
+	normalizedURL, err := redmineclient.NormalizeBaseURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
 
-	client := redmineclient.New(baseURL, apiKey, s.httpClient)
+	client := redmineclient.New(normalizedURL, apiKey, s.httpClient)
 	if _, err := client.ValidateCredentials(ctx); err != nil {
 		return nil, err
 	}
@@ -94,7 +98,7 @@ func (s *Service) Connect(ctx context.Context, workspaceID, baseURL, apiKey stri
 		return nil, fmt.Errorf("connection: storing api key: %w", err)
 	}
 
-	record := &Record{BaseURL: baseURL, State: StateConnected, LastOK: nowRFC3339()}
+	record := &Record{BaseURL: normalizedURL, State: StateConnected, LastOK: nowRFC3339()}
 	if err := s.saveRecord(ctx, workspaceID, record); err != nil {
 		return nil, err
 	}

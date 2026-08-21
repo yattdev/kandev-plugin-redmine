@@ -55,7 +55,7 @@ func (c *Client) doWithJSONBody(ctx context.Context, method, path string, body, 
 // PostBinary uploads raw bytes with an explicit Content-Type — the Redmine
 // attachment upload-token flow's first step (POST /uploads.json,
 // Content-Type: application/octet-stream).
-func (c *Client) PostBinary(ctx context.Context, path, contentType string, body io.Reader, out any) error {
+func (c *Client) PostBinary(ctx context.Context, path, contentType string, body io.Reader, query map[string]string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, body)
 	if err != nil {
 		return fmt.Errorf("redmineclient: building request: %w", err)
@@ -63,5 +63,10 @@ func (c *Client) PostBinary(ctx context.Context, path, contentType string, body 
 	req.Header.Set("X-Redmine-API-Key", c.apiKey)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", contentType)
+	q := req.URL.Query()
+	for key, value := range query {
+		q.Set(key, value)
+	}
+	req.URL.RawQuery = q.Encode()
 	return c.do(req, out)
 }

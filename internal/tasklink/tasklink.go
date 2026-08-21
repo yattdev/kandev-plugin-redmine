@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strconv"
+	"sync"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
 )
@@ -41,6 +42,7 @@ const (
 
 type Service struct {
 	host pluginsdk.Host
+	mu   sync.Mutex
 }
 
 func New(host pluginsdk.Host) *Service {
@@ -50,9 +52,27 @@ func New(host pluginsdk.Host) *Service {
 // Set links taskID to a Redmine issue and adds it to the workspace's reverse
 // index (issue ID -> task ID) the sync/watch loops use.
 func (s *Service) Set(ctx context.Context, taskID, workspaceID string, issueID int, issueURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index, err := s.index(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if existing, ok := index[strconv.Itoa(issueID)]; ok && existing != taskID {
+		return fmt.Errorf("tasklink: Redmine issue %d is already linked to task %s", issueID, existing)
+	}
+	previous, found, err := s.Get(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	link := Link{IssueID: issueID, IssueURL: issueURL, WorkspaceID: workspaceID}
 	if err := s.save(ctx, taskID, link); err != nil {
 		return err
+	}
+	if found && (previous.WorkspaceID != workspaceID || previous.IssueID != issueID) {
+		if err := s.removeFromIndexIfOwned(ctx, previous.WorkspaceID, previous.IssueID, taskID); err != nil {
+			return err
+		}
 	}
 	return s.addToIndex(ctx, workspaceID, issueID, taskID)
 }
@@ -73,6 +93,8 @@ func (s *Service) Get(ctx context.Context, taskID string) (*Link, bool, error) {
 // Unset removes the link and its reverse-index entry. A no-op if taskID
 // isn't linked.
 func (s *Service) Unset(ctx context.Context, taskID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	link, found, err := s.Get(ctx, taskID)
 	if err != nil {
 		return err
@@ -83,7 +105,7 @@ func (s *Service) Unset(ctx context.Context, taskID string) error {
 	if !found {
 		return nil
 	}
-	return s.removeFromIndex(ctx, link.WorkspaceID, link.IssueID)
+	return s.removeFromIndexIfOwned(ctx, link.WorkspaceID, link.IssueID, taskID)
 }
 
 // TaskIDForIssue resolves the reverse index: which task, if any, is linked
@@ -97,6 +119,26 @@ func (s *Service) TaskIDForIssue(ctx context.Context, workspaceID string, issueI
 	}
 	taskID, ok := index[strconv.Itoa(issueID)]
 	return taskID, ok, nil
+}
+
+// ClearWorkspace deletes every task-scoped link named by this workspace's
+// reverse index before removing the index itself.
+func (s *Service) ClearWorkspace(ctx context.Context, workspaceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index, err := s.index(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	for _, taskID := range index {
+		if err := s.host.DeleteState(ctx, taskScope, taskID, linkKey); err != nil {
+			return fmt.Errorf("tasklink: clearing task link: %w", err)
+		}
+	}
+	if err := s.host.DeleteState(ctx, workspaceScope, workspaceID, indexKey); err != nil {
+		return fmt.Errorf("tasklink: clearing issue index: %w", err)
+	}
+	return nil
 }
 
 // RecordPushedStatus records the status this plugin itself just pushed
@@ -128,6 +170,26 @@ func (s *Service) RecordPushedTitleAndDescription(ctx context.Context, taskID, t
 	}
 	link.LastPushedTitle = title
 	link.LastPushedDescriptionHash = HashDescription(description)
+	return s.save(ctx, taskID, *link)
+}
+
+// ConsumeEcho clears markers after the matching inbound observation. Markers
+// are intentionally one-shot: a later independent Redmine update back to the
+// same value must not be suppressed forever.
+func (s *Service) ConsumeEcho(ctx context.Context, taskID string, status, title, description bool) error {
+	link, found, err := s.Get(ctx, taskID)
+	if err != nil || !found {
+		return err
+	}
+	if status {
+		link.LastPushedStatusID = nil
+	}
+	if title {
+		link.LastPushedTitle = ""
+	}
+	if description {
+		link.LastPushedDescriptionHash = ""
+	}
 	return s.save(ctx, taskID, *link)
 }
 
@@ -179,6 +241,19 @@ func (s *Service) removeFromIndex(ctx context.Context, workspaceID string, issue
 		return err
 	}
 	delete(index, strconv.Itoa(issueID))
+	return s.saveIndex(ctx, workspaceID, index)
+}
+
+func (s *Service) removeFromIndexIfOwned(ctx context.Context, workspaceID string, issueID int, taskID string) error {
+	index, err := s.index(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	key := strconv.Itoa(issueID)
+	if index[key] != taskID {
+		return nil
+	}
+	delete(index, key)
 	return s.saveIndex(ctx, workspaceID, index)
 }
 

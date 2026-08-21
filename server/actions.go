@@ -158,16 +158,7 @@ func (p *redminePlugin) handleConnectionSave(ctx context.Context, req *pluginsdk
 // removing the connection itself, so deleting a connection never leaves
 // orphaned watcher tasks behind (spec "Failure modes").
 func (p *redminePlugin) handleConnectionDisconnect(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
-	watches, err := p.watchSvc.ListWatches(ctx, req.Context.WorkspaceID)
-	if err != nil {
-		return nil, err
-	}
-	for _, w := range watches {
-		if err := p.watchSvc.DeleteWatch(ctx, req.Context.WorkspaceID, w.ID); err != nil {
-			return nil, err
-		}
-	}
-	if err := p.connectionSvc.Disconnect(ctx, req.Context.WorkspaceID); err != nil {
+	if err := p.clearWorkspace(ctx, req.Context.WorkspaceID); err != nil {
 		return nil, err
 	}
 	return jsonResponse(map[string]bool{"disconnected": true})

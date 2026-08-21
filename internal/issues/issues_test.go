@@ -135,12 +135,14 @@ func TestUpdateIssue_SendsFullFieldSet(t *testing.T) {
 func TestUploadAttachment_ThenCreateIssue_IncludesTokenInUploadsArray(t *testing.T) {
 	var gotUploadContentType string
 	var gotUploadBody []byte
+	var gotUploadFilename string
 	var gotCreateBody map[string]any
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/uploads.json":
 			gotUploadContentType = r.Header.Get("Content-Type")
+			gotUploadFilename = r.URL.Query().Get("filename")
 			gotUploadBody, _ = io.ReadAll(r.Body)
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"upload":{"id":1,"token":"abc123.def456"}}`))
@@ -158,15 +160,16 @@ func TestUploadAttachment_ThenCreateIssue_IncludesTokenInUploadsArray(t *testing
 	client := redmineclient.New(srv.URL, "key", srv.Client())
 	svc := issues.New(client)
 
-	token, err := svc.UploadAttachment(context.Background(), strings.NewReader("file contents"))
+	upload, err := svc.UploadAttachment(context.Background(), "evidence.txt", "text/plain", strings.NewReader("file contents"))
 	require.NoError(t, err)
-	require.Equal(t, "abc123.def456", token)
-	require.Equal(t, "application/octet-stream", gotUploadContentType)
+	require.Equal(t, "abc123.def456", upload.Token)
+	require.Equal(t, "text/plain", gotUploadContentType)
+	require.Equal(t, "evidence.txt", gotUploadFilename)
 	require.Equal(t, "file contents", string(gotUploadBody))
 
 	_, err = svc.CreateIssue(context.Background(), issues.IssueWrite{
-		Subject:      "with attachment",
-		UploadTokens: []string{token},
+		Subject: "with attachment",
+		Uploads: []issues.Upload{upload},
 	})
 	require.NoError(t, err)
 
@@ -175,7 +178,9 @@ func TestUploadAttachment_ThenCreateIssue_IncludesTokenInUploadsArray(t *testing
 	uploads, ok := issueBody["uploads"].([]any)
 	require.True(t, ok)
 	require.Len(t, uploads, 1)
-	upload, ok := uploads[0].(map[string]any)
+	uploadBody, ok := uploads[0].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "abc123.def456", upload["token"])
+	require.Equal(t, "abc123.def456", uploadBody["token"])
+	require.Equal(t, "evidence.txt", uploadBody["filename"])
+	require.Equal(t, "text/plain", uploadBody["content_type"])
 }

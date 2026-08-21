@@ -106,6 +106,13 @@ func (s *Service) Get(ctx context.Context, workspaceID string) (Mapping, bool, e
 	return mappingFromMap(value), true, nil
 }
 
+func (s *Service) Clear(ctx context.Context, workspaceID string) error {
+	if err := s.host.DeleteState(ctx, stateScope, workspaceID, stateKey); err != nil {
+		return fmt.Errorf("fieldmapping: clearing: %w", err)
+	}
+	return nil
+}
+
 // DeriveCustomFieldsFromIssues unions the custom fields observed across a
 // set of already-fetched issues, deduplicated by field ID — the fallback the
 // spec requires when /custom_fields.json 403s for a non-admin API key,

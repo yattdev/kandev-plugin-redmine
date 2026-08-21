@@ -65,7 +65,7 @@ capabilities:
   secrets: true
   api_read: ["tasks", "workflows"]
   api_write: ["tasks"]
-  events: ["task.moved"]
+  events: ["task.moved", "workspace.deleted"]
 
 # actions: the plugin's own native settings UI calls these via
 # host.api.invokeAction (never host.api.fetch, which cannot reach them). Every

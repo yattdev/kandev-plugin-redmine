@@ -85,7 +85,19 @@ func (s *Service) CreateWatch(ctx context.Context, w Watch) (Watch, error) {
 // UpdateWatch persists changes to an existing watch (identified by w.ID),
 // including enabling/disabling it.
 func (s *Service) UpdateWatch(ctx context.Context, w Watch) error {
-	return s.saveWatchInList(ctx, w)
+	if w.ID == "" {
+		return fmt.Errorf("watch: id is required for update")
+	}
+	watches, err := s.ListWatches(ctx, w.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	for _, existing := range watches {
+		if existing.ID == w.ID {
+			return s.saveWatchInList(ctx, w)
+		}
+	}
+	return fmt.Errorf("watch: %s does not belong to workspace %s", w.ID, w.WorkspaceID)
 }
 
 // ListWatches returns every watch for workspaceID.
@@ -113,7 +125,24 @@ func (s *Service) ListWatches(ctx context.Context, workspaceID string) ([]Watch,
 // via PluginOwnedTaskTrees, so disabling/removing a watch never leaves
 // orphaned tasks behind.
 func (s *Service) DeleteWatch(ctx context.Context, workspaceID, watchID string) error {
-	tasks, err := s.watchTasks(ctx, watchID)
+	if watchID == "" {
+		return fmt.Errorf("watch: id is required for delete")
+	}
+	watches, err := s.ListWatches(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, w := range watches {
+		if w.ID == watchID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("watch: %s does not belong to workspace %s", watchID, workspaceID)
+	}
+	tasks, err := s.watchTasks(ctx, workspaceID, watchID)
 	if err != nil {
 		return err
 	}
@@ -124,10 +153,24 @@ func (s *Service) DeleteWatch(ctx context.Context, workspaceID, watchID string) 
 			}
 		}
 	}
-	if err := s.host.DeleteState(ctx, watchScope, watchID, tasksKey); err != nil {
+	if err := s.host.DeleteState(ctx, watchScope, watchStateID(workspaceID, watchID), tasksKey); err != nil {
 		return fmt.Errorf("watch: deleting task index: %w", err)
 	}
 	return s.removeWatchFromList(ctx, workspaceID, watchID)
+}
+
+// ClearWorkspace removes all watches and their plugin-owned task trees.
+func (s *Service) ClearWorkspace(ctx context.Context, workspaceID string) error {
+	watches, err := s.ListWatches(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	for _, w := range watches {
+		if err := s.DeleteWatch(ctx, workspaceID, w.ID); err != nil {
+			return err
+		}
+	}
+	return s.host.DeleteState(ctx, workspaceScope, workspaceID, watchesKey)
 }
 
 // Poll fetches issues in watch's project, creates one task per newly
@@ -138,36 +181,40 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 		return nil
 	}
 
-	result, err := issuesSvc.ListIssues(ctx, issues.ListIssuesParams{ProjectID: strconv.Itoa(w.ProjectID), Limit: 100})
-	if err != nil {
-		return err
-	}
-
-	for _, issue := range result.Issues {
-		if !w.matches(issue) {
-			continue
-		}
-		seen, err := s.hasSeen(ctx, w.ID, issue.ID)
+	for offset := 0; ; {
+		result, err := issuesSvc.ListIssues(ctx, issues.ListIssuesParams{ProjectID: strconv.Itoa(w.ProjectID), Offset: offset, Limit: 100})
 		if err != nil {
 			return err
 		}
-		if seen {
-			continue
-		}
-		if w.MaxInflightTasks > 0 {
-			inflight, err := s.inflightCount(ctx, w)
+		for _, issue := range result.Issues {
+			if !w.matches(issue) {
+				continue
+			}
+			seen, err := s.hasSeen(ctx, w.WorkspaceID, w.ID, issue.ID)
 			if err != nil {
 				return err
 			}
-			if inflight >= w.MaxInflightTasks {
-				continue // leave unseen: retry once a slot frees up
+			if seen {
+				continue
+			}
+			if w.MaxInflightTasks > 0 {
+				inflight, err := s.inflightCount(ctx, w)
+				if err != nil {
+					return err
+				}
+				if inflight >= w.MaxInflightTasks {
+					continue // leave unseen: retry once a slot frees up
+				}
+			}
+			if err := s.createTask(ctx, w, issue); err != nil {
+				return err
 			}
 		}
-		if err := s.createTask(ctx, w, issue); err != nil {
-			return err
+		offset += len(result.Issues)
+		if len(result.Issues) == 0 || offset >= result.TotalCount {
+			return nil
 		}
 	}
-	return nil
 }
 
 func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) error {
@@ -183,7 +230,7 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 	if err != nil {
 		return fmt.Errorf("watch: creating task for issue %d: %w", issue.ID, err)
 	}
-	return s.recordWatchTask(ctx, w.ID, issue.ID, task.ID)
+	return s.recordWatchTask(ctx, w.WorkspaceID, w.ID, issue.ID, task.ID)
 }
 
 // inflightCount counts this watch's created tasks that are not yet in a
@@ -193,7 +240,7 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 // authoritative per-watch task list; the metadata key is what a mismatch
 // bug would silently break — see the constant's doc comment).
 func (s *Service) inflightCount(ctx context.Context, w Watch) (int, error) {
-	tasks, err := s.watchTasks(ctx, w.ID)
+	tasks, err := s.watchTasks(ctx, w.WorkspaceID, w.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -213,8 +260,8 @@ func (s *Service) inflightCount(ctx context.Context, w Watch) (int, error) {
 	return count, nil
 }
 
-func (s *Service) hasSeen(ctx context.Context, watchID string, issueID int) (bool, error) {
-	tasks, err := s.watchTasks(ctx, watchID)
+func (s *Service) hasSeen(ctx context.Context, workspaceID, watchID string, issueID int) (bool, error) {
+	tasks, err := s.watchTasks(ctx, workspaceID, watchID)
 	if err != nil {
 		return false, err
 	}
@@ -222,8 +269,10 @@ func (s *Service) hasSeen(ctx context.Context, watchID string, issueID int) (boo
 	return ok, nil
 }
 
-func (s *Service) watchTasks(ctx context.Context, watchID string) (map[int]string, error) {
-	value, found, err := s.host.GetState(ctx, watchScope, watchID, tasksKey)
+func watchStateID(workspaceID, watchID string) string { return workspaceID + ":" + watchID }
+
+func (s *Service) watchTasks(ctx context.Context, workspaceID, watchID string) (map[int]string, error) {
+	value, found, err := s.host.GetState(ctx, watchScope, watchStateID(workspaceID, watchID), tasksKey)
 	if err != nil {
 		return nil, fmt.Errorf("watch: reading task index: %w", err)
 	}
@@ -244,8 +293,8 @@ func (s *Service) watchTasks(ctx context.Context, watchID string) (map[int]strin
 	return out, nil
 }
 
-func (s *Service) recordWatchTask(ctx context.Context, watchID string, issueID int, taskID string) error {
-	tasks, err := s.watchTasks(ctx, watchID)
+func (s *Service) recordWatchTask(ctx context.Context, workspaceID, watchID string, issueID int, taskID string) error {
+	tasks, err := s.watchTasks(ctx, workspaceID, watchID)
 	if err != nil {
 		return err
 	}
@@ -254,7 +303,7 @@ func (s *Service) recordWatchTask(ctx context.Context, watchID string, issueID i
 	for id, tID := range tasks {
 		values[strconv.Itoa(id)] = tID
 	}
-	if err := s.host.SetState(ctx, watchScope, watchID, tasksKey, map[string]any{"issue_id_to_task_id": values}); err != nil {
+	if err := s.host.SetState(ctx, watchScope, watchStateID(workspaceID, watchID), tasksKey, map[string]any{"issue_id_to_task_id": values}); err != nil {
 		return fmt.Errorf("watch: saving task index: %w", err)
 	}
 	return nil

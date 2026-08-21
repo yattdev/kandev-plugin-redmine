@@ -67,6 +67,16 @@ func (s *Service) GetOptions(ctx context.Context, workspaceID string) (Options, 
 	return Options{AutoStatusWriteback: autoWriteback, SyncTitleDescription: syncTitleDesc}, nil
 }
 
+func (s *Service) Clear(ctx context.Context, workspaceID string) error {
+	if err := s.host.DeleteState(ctx, stateScope, workspaceID, cursorKey); err != nil {
+		return fmt.Errorf("sync: clearing cursor: %w", err)
+	}
+	if err := s.host.DeleteState(ctx, stateScope, workspaceID, optionsKey); err != nil {
+		return fmt.Errorf("sync: clearing options: %w", err)
+	}
+	return nil
+}
+
 type Service struct {
 	host     pluginsdk.Host
 	tasklink *tasklink.Service
@@ -153,18 +163,26 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 
 	update := pluginsdk.UpdateTaskInput{ID: taskID}
 	changed := false
+	statusEcho, titleEcho, descriptionEcho := false, false, false
 
 	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok {
-		echo := link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
-		if !echo {
+		statusEcho = link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
+		if !statusEcho {
 			update.WorkflowStepID = &stepID
 			changed = true
 		}
 	}
 
 	if opts.SyncTitleDescription {
-		if applyTitleAndDescription(&update, issue, *link) {
+		titleEcho = link.LastPushedTitle != "" && link.LastPushedTitle == issue.Subject
+		descriptionEcho = link.LastPushedDescriptionHash != "" && link.LastPushedDescriptionHash == tasklink.HashDescription(issue.Description)
+		if applyTitleAndDescription(&update, issue, *link, titleEcho, descriptionEcho) {
 			changed = true
+		}
+	}
+	if statusEcho || titleEcho || descriptionEcho {
+		if err := s.tasklink.ConsumeEcho(ctx, taskID, statusEcho, titleEcho, descriptionEcho); err != nil {
+			return err
 		}
 	}
 
@@ -177,16 +195,14 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 	return nil
 }
 
-func applyTitleAndDescription(update *pluginsdk.UpdateTaskInput, issue issues.Issue, link tasklink.Link) bool {
+func applyTitleAndDescription(update *pluginsdk.UpdateTaskInput, issue issues.Issue, link tasklink.Link, titleEcho, descriptionEcho bool) bool {
 	changed := false
-	titleEcho := link.LastPushedTitle != "" && link.LastPushedTitle == issue.Subject
 	if !titleEcho && issue.Subject != "" {
 		subject := issue.Subject
 		update.Title = &subject
 		changed = true
 	}
-	descEcho := link.LastPushedDescriptionHash != "" && link.LastPushedDescriptionHash == tasklink.HashDescription(issue.Description)
-	if !descEcho {
+	if !descriptionEcho {
 		description := issue.Description
 		update.Description = &description
 		changed = true
