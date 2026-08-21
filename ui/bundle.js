@@ -283,6 +283,7 @@ function makeSettingsComponent(host) {
   // -- Field mapping -------------------------------------------------------
   function FieldMappingSection({ workspaceId, connected }) {
     const React = host.React;
+    const unmappedValue = "__unmapped__";
     const [loading, setLoading] = React.useState(true);
     const [live, setLive] = React.useState(null);
     const [workflows, setWorkflows] = React.useState([]);
@@ -356,7 +357,7 @@ function makeSettingsComponent(host) {
       const priorities = (live.live_priorities || []).map((p) => ({
         redmine_priority_id: p.id,
         redmine_name: p.name,
-        task_priority: priorityMap[p.id] || "medium",
+        task_priority: priorityMap[p.id] || "",
       }));
       await invoke("fieldmapping.save", workspaceId, { workflow_id: workflowId, statuses, trackers, priorities });
       toast.success("Field mapping saved.");
@@ -407,14 +408,14 @@ function makeSettingsComponent(host) {
                     h(
                       Select,
                       {
-                        value: statusSteps[status.id] || "",
-                        onValueChange: (value) => setStatusSteps({ ...statusSteps, [status.id]: value }),
+                        value: statusSteps[status.id] || unmappedValue,
+                        onValueChange: (value) => setStatusSteps({ ...statusSteps, [status.id]: value === unmappedValue ? "" : value }),
                       },
                       h(SelectTrigger, { "data-testid": `redmine-status-step-${status.id}` }, h(SelectValue, { placeholder: "Unmapped" })),
                       h(
                         SelectContent,
                         null,
-                        allSteps.map((step) => h(SelectItem, { key: step.id, value: step.id }, step.name)),
+                        [h(SelectItem, { key: unmappedValue, value: unmappedValue }, "Unmapped")].concat(allSteps.map((step) => h(SelectItem, { key: step.id, value: step.id }, step.name))),
                       ),
                     ),
                   ),
@@ -461,27 +462,25 @@ function makeSettingsComponent(host) {
                   Select,
                   {
                     "data-testid": "redmine-priority-map-" + priority.id,
-                    value: priorityMap[priority.id] || "medium",
-                    onValueChange: (value) => setPriorityMap({ ...priorityMap, [priority.id]: value }),
+                    value: priorityMap[priority.id] || unmappedValue,
+                    onValueChange: (value) => setPriorityMap({ ...priorityMap, [priority.id]: value === unmappedValue ? "" : value }),
                   },
                   h(SelectTrigger, null, h(SelectValue, null)),
                   h(
                     SelectContent,
                     null,
-                    ["critical", "high", "medium", "low"].map((p) => h(SelectItem, { key: p, value: p }, p)),
+                    [h(SelectItem, { key: unmappedValue, value: unmappedValue }, "Unmapped")].concat(["critical", "high", "medium", "low"].map((p) => h(SelectItem, { key: p, value: p }, p))),
                   ),
                 ),
               ),
             ),
           ),
         ),
-        live.custom_fields_derived
-          ? h(
-              "p",
-              { className: "text-muted-foreground text-xs", id: "redmine-custom-fields-derived-note" },
-              `Custom fields derived from recent issues (${(live.custom_fields || []).length} found) — the connected API key is not an admin key, so /custom_fields.json is unavailable.`,
-            )
-          : null,
+        h("div", { id: "redmine-custom-fields", "data-testid": "redmine-custom-fields" },
+          h("h4", { className: "mb-2 text-sm font-medium" }, "Redmine custom fields"),
+          (live.custom_fields || []).length ? h("ul", null, (live.custom_fields || []).map((field) => h("li", { key: field.id, "data-testid": "redmine-custom-field-" + field.id }, `#${field.id} ${field.name}`))) : h("p", { className: "text-muted-foreground text-xs" }, "No custom fields available."),
+          live.custom_fields_derived ? h("p", { className: "text-muted-foreground text-xs", id: "redmine-custom-fields-derived-note" }, "Custom fields were derived from recent issues because this API key cannot list them.") : null,
+        ),
       ),
       h(CardFooter, null, h(Button, { id: "redmine-fieldmapping-save", onClick: onSave }, "Save mapping")),
     );

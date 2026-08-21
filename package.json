@@ -1,0 +1,5 @@
+{
+  "name": "kandev-plugin-redmine-ui-contracts",
+  "private": true,
+  "scripts": { "test:ui-contract": "node --test ui/bundle.contract.test.mjs" }
+}
