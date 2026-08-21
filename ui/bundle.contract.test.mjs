@@ -11,12 +11,31 @@ async function loadBundleTestHooks() {
   return globalThis.__redmineBundleTestHooks;
 }
 
-test("mapping selects use a nonempty unmapped sentinel and save empty mappings", () => {
+test("mapping selects use host controls and explicitly added live statuses", () => {
   assert.match(bundle, /const unmappedValue = "__unmapped__"/);
   assert.match(bundle, /value === unmappedValue \? "" : value/);
   assert.match(bundle, /task_priority: priorityMap\[p\.id\] \|\| ""/);
   assert.match(bundle, /redmine-status-step-\$\{status\.id\}/);
+  assert.match(bundle, /redmine-status-add-select/);
+  assert.match(bundle, /redmine-status-add/);
+  assert.match(bundle, /redmine-status-remove-\$\{status\.id\}/);
+  assert.match(bundle, /Choose a workflow step for every added Redmine status/);
   assert.match(bundle, /redmine-priority-map-" \+ priority\.id/);
+});
+
+test("integration registration supplies a branded icon and workspace enable action", () => {
+  assert.match(bundle, /icon: redmineIcon/);
+  assert.match(bundle, /action: makeIntegrationEnabledAction\(host\)/);
+  assert.match(bundle, /host\.ui\.IntegrationEnabledControl/);
+  assert.match(bundle, /"integration.enabled.get"/);
+  assert.match(bundle, /"integration.enabled.save"/);
+});
+
+test("watcher filters use Kandev Select controls and nonempty optional sentinels", () => {
+  assert.match(bundle, /redmine-watch-project/);
+  assert.match(bundle, /__any_tracker__/);
+  assert.match(bundle, /__any_status__/);
+  assert.doesNotMatch(bundle, /h\("select", \{ id: "redmine-new-watch-/);
 });
 
 test("mapping renders custom field identifiers and derived-mode evidence", () => {

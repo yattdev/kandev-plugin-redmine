@@ -48,6 +48,7 @@ test("configures the per-workspace Redmine connection and captures validation UI
   expect(Array.isArray(mapping.live_priorities)).toBeTruthy();
   expect(Array.isArray(mapping.custom_fields)).toBeTruthy();
   expect((mapping.custom_fields as JsonRecord[]).some((field) => String(field.name).length > 0)).toBeTruthy();
+  expect(mapping.custom_fields_derived).toBe(true);
 
   const workflows = await responseJSON(
     await request.get(`/api/v1/workspaces/${workspaceId}/workflows`),
@@ -196,6 +197,33 @@ test("configures the per-workspace Redmine connection and captures validation UI
     })
     .toBe(resumedTitle);
 
+  // The workspace integration switch pauses polling without deleting the
+  // connection or cursor, then resumes from that preserved state.
+  await expect(
+    invokeAction(request, workspaceId, "integration.enabled.save", { enabled: false }),
+  ).resolves.toEqual({ enabled: false });
+  const pausedTitle = `Paused Redmine update ${Date.now()}`;
+  await expect(
+    invokeAction(request, workspaceId, "issues.update", { issue_id: issueID, subject: pausedTitle }),
+  ).resolves.toEqual({ updated: true });
+  const pauseStartedAt = Date.now();
+  await expect
+    .poll(async () => {
+      if (Date.now() - pauseStartedAt < 3_500) return "waiting-for-disabled-poll-window";
+      const updatedTask = await responseJSON(await request.get(`/api/v1/tasks/${taskID}`));
+      return updatedTask.title;
+    }, { timeout: 10_000 })
+    .toBe(resumedTitle);
+  await expect(
+    invokeAction(request, workspaceId, "integration.enabled.save", { enabled: true }),
+  ).resolves.toEqual({ enabled: true });
+  await expect
+    .poll(async () => {
+      const updatedTask = await responseJSON(await request.get(`/api/v1/tasks/${taskID}`));
+      return updatedTask.title;
+    })
+    .toBe(pausedTitle);
+
   await expect(
     invokeAction(request, workspaceId, "syncoptions.save", {
       auto_status_writeback: true,
@@ -255,6 +283,29 @@ test("configures the per-workspace Redmine connection and captures validation UI
   await expect(page.locator("#redmine-connection-state")).toHaveText("connected");
   await expect(page.getByTestId("redmine-api-key-input")).toHaveValue("");
   await expect(page.getByTestId("redmine-projects-save")).toBeVisible();
+  await expect(page.getByTestId("redmine-mapping-workflow")).toBeVisible();
+  await expect(page.locator("#redmine-status-mapping-table tbody tr")).toHaveCount(2);
+
+  const unusedStatus = liveStatuses.find(
+    (status) => Number(status.id) !== statusID && Number(status.id) !== secondStatusID,
+  );
+  expect(unusedStatus).toBeTruthy();
+  await page.getByTestId("redmine-status-add-select").click();
+  await page.getByRole("option", { name: String(unusedStatus?.name), exact: true }).click();
+  await page.getByTestId("redmine-status-add").click();
+  await expect(page.getByTestId(`redmine-status-step-${unusedStatus?.id}`)).toBeVisible();
+  await page.getByTestId(`redmine-status-step-${unusedStatus?.id}`).click();
+  await page.getByRole("option", { name: String(firstStep.name), exact: true }).click();
+  await page.getByTestId("redmine-fieldmapping-save").click();
+  await expect
+    .poll(async () => ((await invokeAction(request, workspaceId, "fieldmapping.get")).statuses as JsonRecord[]).length)
+    .toBe(3);
+  await page.getByTestId(`redmine-status-remove-${unusedStatus?.id}`).click();
+  await expect(page.getByTestId(`redmine-status-step-${unusedStatus?.id}`)).toHaveCount(0);
+  await page.getByTestId("redmine-fieldmapping-save").click();
+  await expect
+    .poll(async () => ((await invokeAction(request, workspaceId, "fieldmapping.get")).statuses as JsonRecord[]).length)
+    .toBe(2);
   await page.screenshot({ path: path.join(screenshotDir, "redmine-connected-settings.png"), fullPage: true });
 
   await expect(page.locator("#redmine-projects-card")).toBeVisible();
@@ -269,6 +320,18 @@ test("configures the per-workspace Redmine connection and captures validation UI
   await page.locator("#redmine-watchers-card").screenshot({
     path: path.join(screenshotDir, "redmine-issue-watchers.png"),
   });
+
+  await page.goto(`/settings/workspaces/${workspaceId}/integrations`);
+  const redmineCard = page.getByTestId(`integration-card-${pluginID}-redmine`);
+  await expect(redmineCard).toBeVisible();
+  await expect(redmineCard.locator("svg[aria-hidden='true']")).toBeVisible();
+  await expect(redmineCard.getByRole("switch", { name: "Enable Redmine" })).toBeChecked();
+  await redmineCard.screenshot({ path: path.join(screenshotDir, "redmine-integration-card.png") });
+
+  await page.goto(`/settings/workspaces/${workspaceId}/integrations/redmine`);
+  await expect(page.getByTestId("redmine-watch-project")).toHaveAttribute("role", "combobox");
+  await expect(page.getByTestId("redmine-watch-tracker")).toHaveAttribute("role", "combobox");
+  await expect(page.getByTestId("redmine-watch-status")).toHaveAttribute("role", "combobox");
 
   // A failed/interrupted local run can leave a watch in plugin state. Remove
   // those definitions through the public action before measuring the new

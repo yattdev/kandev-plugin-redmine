@@ -156,6 +156,10 @@ func (p *redminePlugin) pollAllWorkspaces(ctx context.Context) {
 }
 
 func (p *redminePlugin) pollWorkspace(ctx context.Context, workspaceID string) error {
+	enabled, err := p.connectionSvc.GetEnabled(ctx, workspaceID)
+	if err != nil || !enabled {
+		return err
+	}
 	client, err := p.connectionSvc.Client(ctx, workspaceID)
 	if err != nil {
 		return nil // not connected (or credentials rejected) - nothing to poll
@@ -254,7 +258,7 @@ func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
 		if workspaceID == "" {
 			return nil
 		}
-		return p.clearWorkspace(ctx, workspaceID)
+		return p.clearWorkspace(ctx, workspaceID, true)
 	}
 	if e.EventType == "task.deleted" {
 		taskID, _ := e.Payload["task_id"].(string)
@@ -296,6 +300,13 @@ func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
 	if !opts.AutoStatusWriteback {
 		return nil
 	}
+	enabled, err := p.connectionSvc.GetEnabled(ctx, link.WorkspaceID)
+	if err != nil {
+		return fmt.Errorf("redmine: OnEvent task.moved: reading enabled state for workspace %s: %w", link.WorkspaceID, err)
+	}
+	if !enabled {
+		return nil
+	}
 
 	client, err := p.connectionSvc.Client(ctx, link.WorkspaceID)
 	if err != nil {
@@ -305,7 +316,7 @@ func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
 	return p.syncSvc.PushWriteback(ctx, taskID, toStepID, mapping, issues.New(client), opts)
 }
 
-func (p *redminePlugin) clearWorkspace(ctx context.Context, workspaceID string) error {
+func (p *redminePlugin) clearWorkspace(ctx context.Context, workspaceID string, clearEnabled bool) error {
 	if err := p.watchSvc.ClearWorkspace(ctx, workspaceID); err != nil {
 		return fmt.Errorf("redmine: clearing watches: %w", err)
 	}
@@ -321,5 +332,11 @@ func (p *redminePlugin) clearWorkspace(ctx context.Context, workspaceID string) 
 	if err := p.syncSvc.Clear(ctx, workspaceID); err != nil {
 		return err
 	}
-	return p.connectionSvc.Disconnect(ctx, workspaceID)
+	if err := p.connectionSvc.Disconnect(ctx, workspaceID); err != nil {
+		return err
+	}
+	if clearEnabled {
+		return p.connectionSvc.ClearEnabled(ctx, workspaceID)
+	}
+	return nil
 }

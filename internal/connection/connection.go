@@ -49,6 +49,7 @@ const (
 	indexScope    = "instance"
 	indexScopeID  = ""
 	indexStateKey = "workspaces"
+	enabledKey    = "enabled"
 )
 
 // secretKey composes the workspace ID into the secret key itself, since the
@@ -57,6 +58,50 @@ const (
 // (^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ — colons are rejected).
 func secretKey(workspaceID string) string {
 	return fmt.Sprintf("redmine.%s.api_key", workspaceID)
+}
+
+// GetEnabled returns the workspace's integration preference. Existing
+// installations predate this preference, so absence deliberately means
+// enabled to preserve their current behavior.
+func (s *Service) GetEnabled(ctx context.Context, workspaceID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, found, err := s.host.GetState(ctx, stateScope, workspaceID, enabledKey)
+	if err != nil {
+		return false, fmt.Errorf("connection: reading enabled state: %w", err)
+	}
+	if !found {
+		return true, nil
+	}
+	enabled, ok := value["enabled"].(bool)
+	if !ok {
+		return true, nil
+	}
+	return enabled, nil
+}
+
+// SetEnabled updates only the workspace preference. Credentials and all
+// mappings remain intact so re-enabling can resume synchronization.
+func (s *Service) SetEnabled(ctx context.Context, workspaceID string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if workspaceID == "" {
+		return errors.New("connection: workspace id is required")
+	}
+	if err := s.host.SetState(ctx, stateScope, workspaceID, enabledKey, map[string]any{"enabled": enabled}); err != nil {
+		return fmt.Errorf("connection: saving enabled state: %w", err)
+	}
+	return nil
+}
+
+// ClearEnabled removes the workspace preference during workspace deletion.
+func (s *Service) ClearEnabled(ctx context.Context, workspaceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.host.DeleteState(ctx, stateScope, workspaceID, enabledKey); err != nil {
+		return fmt.Errorf("connection: deleting enabled state: %w", err)
+	}
+	return nil
 }
 
 // Service is the connection lifecycle service. Safe for concurrent use: it

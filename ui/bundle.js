@@ -86,6 +86,41 @@ function taskActionInvoke(host, key, context, body) {
   return actionInvoke(host, key, { workspaceId: context.workspaceId, taskId: context.taskId }, body);
 }
 
+function makeRedmineIcon(host) {
+  return function RedmineIcon({ className }) {
+    return host.jsx(
+      "svg",
+      { className, viewBox: "0 0 24 24", "aria-hidden": true, focusable: false, fill: "currentColor" },
+      host.jsx("path", { d: "M4 3h9a6 6 0 0 1 2.1 11.62L21 21h-5.45l-5.05-6H9v6H4V3Zm5 4v4h4a2 2 0 1 0 0-4H9Z" }),
+    );
+  };
+}
+
+function makeIntegrationEnabledAction(host) {
+  return function RedmineIntegrationEnabledAction({ workspaceId }) {
+    const React = host.React;
+    const [enabled, setEnabled] = React.useState(null);
+    React.useEffect(() => {
+      let active = true;
+      if (!workspaceId) { setEnabled(null); return () => { active = false; }; }
+      workspaceActionInvoke(host, "integration.enabled.get", { workspaceId }, {}).then((result) => {
+        if (active) setEnabled(result.enabled !== false);
+      }).catch((err) => host.toast.error(err.message || String(err)));
+      return () => { active = false; };
+    }, [workspaceId]);
+    if (!workspaceId || enabled === null) return null;
+    return host.jsx(host.ui.IntegrationEnabledControl, {
+      id: "redmine",
+      name: "Redmine",
+      enabled,
+      persist: async (nextEnabled) => {
+        await workspaceActionInvoke(host, "integration.enabled.save", { workspaceId }, { enabled: nextEnabled });
+        setEnabled(nextEnabled);
+      },
+    });
+  };
+}
+
 // The controller serializes option writes. Keeping this outside the React
 // component makes its failure rollback behavior testable without a browser.
 function createSyncSaveController(invoke, workspaceId, toast, apply, setSaving) {
@@ -409,6 +444,8 @@ function makeSettingsComponent(host) {
     const [live, setLive] = React.useState(null);
     const [workflows, setWorkflows] = React.useState([]);
     const [workflowId, setWorkflowId] = React.useState("");
+    const [statusIDs, setStatusIDs] = React.useState([]);
+    const [statusToAdd, setStatusToAdd] = React.useState("");
     const [statusSteps, setStatusSteps] = React.useState({});
     const [trackerLabels, setTrackerLabels] = React.useState({});
     const [priorityMap, setPriorityMap] = React.useState({});
@@ -435,6 +472,7 @@ function makeSettingsComponent(host) {
           steps[s.redmine_status_id] = s.workflow_step_id;
         });
         setStatusSteps(steps);
+        setStatusIDs((fields.statuses || []).filter((status) => status.workflow_step_id).map((status) => status.redmine_status_id));
 
         const labels = {};
         (fields.trackers || []).forEach((t) => {
@@ -463,10 +501,32 @@ function makeSettingsComponent(host) {
 
     const selectedWorkflow = workflows.find((wf) => wf.id === workflowId);
     const allSteps = (selectedWorkflow && selectedWorkflow.steps) || [];
+    const mappedStatuses = statusIDs.map((id) => (live.live_statuses || []).find((status) => status.id === id)).filter(Boolean);
+    const availableStatuses = (live.live_statuses || []).filter((status) => !statusIDs.includes(status.id));
+
+    const addStatus = () => {
+      const id = Number(statusToAdd);
+      if (!Number.isSafeInteger(id) || id <= 0 || statusIDs.includes(id)) return;
+      setStatusIDs([...statusIDs, id]);
+      setStatusToAdd("");
+    };
+
+    const removeStatus = (id) => {
+      setStatusIDs(statusIDs.filter((statusID) => statusID !== id));
+      setStatusSteps((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+    };
 
     const onSave = async () => {
       if (saving) return;
-      const statuses = (live.live_statuses || []).map((s) => ({
+      if (statusIDs.some((id) => !statusSteps[id])) {
+        toast.error("Choose a workflow step for every added Redmine status.");
+        return;
+      }
+      const statuses = mappedStatuses.map((s) => ({
         redmine_status_id: s.id,
         redmine_name: s.name,
         is_closed: s.is_closed,
@@ -505,29 +565,30 @@ function makeSettingsComponent(host) {
       h(
         CardContent,
         { className: "space-y-6" },
-        h("div", null,
+        h("div", { className: "space-y-2" },
           h(Label, { htmlFor: "redmine-mapping-workflow" }, "Kandev workflow"),
-          h("select", { id: "redmine-mapping-workflow", "data-testid": "redmine-mapping-workflow", value: workflowId, onChange: (event) => {
-            const nextWorkflowId = event.target.value;
+          h(Select, { value: workflowId, onValueChange: (nextWorkflowId) => {
             const nextWorkflow = workflows.find((workflow) => workflow.id === nextWorkflowId);
             const allowedStepIDs = new Set(((nextWorkflow && nextWorkflow.steps) || []).map((step) => step.id));
             setWorkflowId(nextWorkflowId);
-            setStatusSteps((current) => Object.fromEntries(Object.entries(current).filter(([, stepID]) => allowedStepIDs.has(stepID))));
+            setStatusSteps((current) => Object.fromEntries(Object.entries(current).map(([statusID, stepID]) => [statusID, allowedStepIDs.has(stepID) ? stepID : ""])));
           } },
-            workflows.map((workflow) => h("option", { key: workflow.id, value: workflow.id }, workflow.name))),
+            h(SelectTrigger, { id: "redmine-mapping-workflow", "data-testid": "redmine-mapping-workflow", className: "w-full" }, h(SelectValue, { placeholder: "Select workflow" })),
+            h(SelectContent, null, workflows.map((workflow) => h(SelectItem, { key: workflow.id, value: workflow.id }, workflow.name))),
+          ),
         ),
         h(
           "div",
-          null,
+          { className: "space-y-3" },
           h("h4", { className: "mb-2 text-sm font-medium" }, "Statuses → workflow step"),
-          h(
+          mappedStatuses.length ? h(
             Table,
             { id: "redmine-status-mapping-table" },
-            h(TableHeader, null, h(TableRow, null, h(TableHead, null, "Redmine status"), h(TableHead, null, "Workflow step"))),
+            h(TableHeader, null, h(TableRow, null, h(TableHead, null, "Redmine status"), h(TableHead, null, "Workflow step"), h(TableHead, { className: "w-20" }, ""))),
             h(
               TableBody,
               null,
-              (live.live_statuses || []).map((status) =>
+              mappedStatuses.map((status) =>
                 h(
                   TableRow,
                   { key: status.id },
@@ -549,9 +610,20 @@ function makeSettingsComponent(host) {
                       ),
                     ),
                   ),
+                  h(TableCell, null, h(Button, { type: "button", variant: "ghost", size: "sm", "data-testid": `redmine-status-remove-${status.id}`, onClick: () => removeStatus(status.id) }, "Remove")),
                 ),
               ),
             ),
+          ) : h("p", { className: "text-muted-foreground text-sm", "data-testid": "redmine-status-mapping-empty" }, "No Redmine statuses mapped yet."),
+          h("div", { className: "flex items-end gap-2" },
+            h("div", { className: "min-w-0 flex-1 space-y-2" },
+              h(Label, null, "Add Redmine status"),
+              h(Select, { value: statusToAdd || "__select_status__", onValueChange: (value) => setStatusToAdd(value === "__select_status__" ? "" : value) },
+                h(SelectTrigger, { "data-testid": "redmine-status-add-select", className: "w-full" }, h(SelectValue, { placeholder: "Select a live Redmine status" })),
+                h(SelectContent, null, [h(SelectItem, { key: "__select_status__", value: "__select_status__" }, "Select a live Redmine status")].concat(availableStatuses.map((status) => h(SelectItem, { key: status.id, value: String(status.id) }, status.name)))),
+              ),
+            ),
+            h(Button, { type: "button", variant: "outline", "data-testid": "redmine-status-add", disabled: !statusToAdd, onClick: addStatus }, "Add status"),
           ),
         ),
         h(
@@ -853,31 +925,34 @@ function makeSettingsComponent(host) {
             ),
         h(
           "div",
-          { className: "flex items-end gap-2" },
+          { className: "grid gap-3 sm:grid-cols-2 lg:grid-cols-[1.2fr_1fr_1fr_1fr_auto] lg:items-end" },
           h(
-            "div",
-            null,
+            "div", { className: "space-y-2" },
             h(Label, { htmlFor: "redmine-new-watch-project" }, "Project"),
-            h("select", {
-              id: "redmine-new-watch-project",
-              "data-testid": "redmine-watch-project",
-              value: newProjectId,
-              onChange: (e) => setNewProjectId(e.target.value),
-            }, [h("option", { value: "" }, "Select project")].concat(projects.map((project) => h("option", { key: project.id, value: project.id }, project.name)))),
+            h(Select, { value: newProjectId || "__select_project__", onValueChange: (value) => setNewProjectId(value === "__select_project__" ? "" : value) },
+              h(SelectTrigger, { id: "redmine-new-watch-project", "data-testid": "redmine-watch-project", className: "w-full" }, h(SelectValue, { placeholder: "Select project" })),
+              h(SelectContent, null, [h(SelectItem, { key: "__select_project__", value: "__select_project__" }, "Select project")].concat(projects.map((project) => h(SelectItem, { key: project.id, value: String(project.id) }, project.name)))),
+            ),
           ),
           h(
-            "div", null,
+            "div", { className: "space-y-2" },
             h(Label, { htmlFor: "redmine-new-watch-tracker" }, "Tracker (optional)"),
-            h("select", { id: "redmine-new-watch-tracker", "data-testid": "redmine-watch-tracker", value: newTrackerId, onChange: (e) => setNewTrackerId(e.target.value) }, [h("option", { value: "" }, "Any tracker")].concat(trackers.map((tracker) => h("option", { key: tracker.id, value: tracker.id }, tracker.name)))),
+            h(Select, { value: newTrackerId || "__any_tracker__", onValueChange: (value) => setNewTrackerId(value === "__any_tracker__" ? "" : value) },
+              h(SelectTrigger, { id: "redmine-new-watch-tracker", "data-testid": "redmine-watch-tracker", className: "w-full" }, h(SelectValue, null)),
+              h(SelectContent, null, [h(SelectItem, { key: "__any_tracker__", value: "__any_tracker__" }, "Any tracker")].concat(trackers.map((tracker) => h(SelectItem, { key: tracker.id, value: String(tracker.id) }, tracker.name)))),
+            ),
           ),
           h(
-            "div", null,
+            "div", { className: "space-y-2" },
             h(Label, { htmlFor: "redmine-new-watch-status" }, "Status (optional)"),
-            h("select", { id: "redmine-new-watch-status", "data-testid": "redmine-watch-status", value: newStatusId, onChange: (e) => setNewStatusId(e.target.value) }, [h("option", { value: "" }, "Any status")].concat(statuses.map((status) => h("option", { key: status.id, value: status.id }, status.name)))),
+            h(Select, { value: newStatusId || "__any_status__", onValueChange: (value) => setNewStatusId(value === "__any_status__" ? "" : value) },
+              h(SelectTrigger, { id: "redmine-new-watch-status", "data-testid": "redmine-watch-status", className: "w-full" }, h(SelectValue, null)),
+              h(SelectContent, null, [h(SelectItem, { key: "__any_status__", value: "__any_status__" }, "Any status")].concat(statuses.map((status) => h(SelectItem, { key: status.id, value: String(status.id) }, status.name)))),
+            ),
           ),
           h(
             "div",
-            null,
+            { className: "space-y-2" },
             h(Label, { htmlFor: "redmine-new-watch-max" }, "Max inflight tasks"),
             h(Input, {
               id: "redmine-new-watch-max",
@@ -889,7 +964,7 @@ function makeSettingsComponent(host) {
               onChange: (e) => setNewMaxInflight(e.target.value),
             }),
           ),
-          h(Button, { id: "redmine-watchers-create", "data-testid": "redmine-watch-create", disabled: creating, onClick: onCreate }, creating ? "Creating…" : "Add watch"),
+          h(Button, { id: "redmine-watchers-create", "data-testid": "redmine-watch-create", className: "w-full lg:w-auto", disabled: creating, onClick: onCreate }, creating ? "Creating…" : "Add watch"),
         ),
       ),
     );
@@ -949,6 +1024,7 @@ function makeSettingsComponent(host) {
 // ---------------------------------------------------------------------------
 window.registerKandevPlugin("kandev-plugin-redmine", {
   initialize(registry, host) {
+    const redmineIcon = makeRedmineIcon(host);
     registry.registerTaskAction(makeLinkTaskAction(host));
     registry.registerTaskMenuAction(makeSetRedmineStatusAction(host));
     registry.registerTaskMenuAction(makeUnlinkRedmineAction(host));
@@ -956,8 +1032,9 @@ window.registerKandevPlugin("kandev-plugin-redmine", {
       id: "redmine",
       label: "Redmine",
       description: "Link tasks to Redmine issues, sync status both ways, and watch for new issues.",
-      icon: "puzzle",
+      icon: redmineIcon,
       Component: makeSettingsComponent(host),
+      action: makeIntegrationEnabledAction(host),
     });
   },
 

@@ -81,6 +81,27 @@ func TestHealthPoll_FailedProbe_MarksDegradedWithoutDeletingSecret(t *testing.T)
 	require.True(t, found, "a failed health probe must not delete the stored key")
 }
 
+func TestHealthPoll_DisabledWorkspaceIsNotProbed(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+	}))
+	defer srv.Close()
+	_, err := svc.Connect(context.Background(), "ws-1", srv.URL, "good-key")
+	require.NoError(t, err)
+	require.EqualValues(t, 1, probes.Load(), "connection validation is the first request")
+	require.NoError(t, svc.SetEnabled(context.Background(), "ws-1", false))
+
+	poller := NewHealthPoller(svc, WithInterval(5*time.Millisecond), WithJitter(0))
+	poller.Start(context.Background())
+	defer poller.Stop()
+	require.Never(t, func() bool { return probes.Load() > 1 }, 40*time.Millisecond, 5*time.Millisecond)
+}
+
 func TestHealthPoll_StartStop_IsIdempotentAndDoesNotLeakGoroutines(t *testing.T) {
 	host := newFakeHost()
 	svc := New(host)

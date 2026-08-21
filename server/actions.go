@@ -44,6 +44,10 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleConnectionSave(ctx, req)
 	case "connection.disconnect":
 		return p.handleConnectionDisconnect(ctx, req)
+	case "integration.enabled.get":
+		return p.handleIntegrationEnabledGet(ctx, req)
+	case "integration.enabled.save":
+		return p.handleIntegrationEnabledSave(ctx, req)
 	case "projects.list":
 		return p.handleProjectsList(ctx, req)
 	case "projects.save":
@@ -85,6 +89,29 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 	default:
 		return nil, fmt.Errorf("redmine: unknown action %q", req.ActionKey)
 	}
+}
+
+type integrationEnabledResponse struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (p *redminePlugin) handleIntegrationEnabledGet(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	enabled, err := p.connectionSvc.GetEnabled(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResponse(integrationEnabledResponse{Enabled: enabled})
+}
+
+func (p *redminePlugin) handleIntegrationEnabledSave(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	body, err := decodeBody[integrationEnabledResponse](req)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.connectionSvc.SetEnabled(ctx, req.Context.WorkspaceID, body.Enabled); err != nil {
+		return nil, err
+	}
+	return jsonResponse(body)
 }
 
 func jsonResponse(v any) (*pluginsdk.PluginActionResponse, error) {
@@ -176,7 +203,7 @@ func (p *redminePlugin) handleConnectionSave(ctx context.Context, req *pluginsdk
 // removing the connection itself, so deleting a connection never leaves
 // orphaned watcher tasks behind (spec "Failure modes").
 func (p *redminePlugin) handleConnectionDisconnect(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
-	if err := p.clearWorkspace(ctx, req.Context.WorkspaceID); err != nil {
+	if err := p.clearWorkspace(ctx, req.Context.WorkspaceID, false); err != nil {
 		return nil, err
 	}
 	return jsonResponse(map[string]bool{"disconnected": true})

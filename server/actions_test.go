@@ -89,6 +89,21 @@ func TestHandleAction_ConnectionSaveThenGet_RoundTrips(t *testing.T) {
 	require.Equal(t, "connected", got["state"])
 }
 
+func TestHandleAction_IntegrationEnabledIsWorkspaceScopedAndPreservesConnection(t *testing.T) {
+	p, _ := newTestPlugin(t)
+	srv := redmineFixtureServer(t, nil)
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
+
+	require.Equal(t, true, handle(t, p, "integration.enabled.get", "ws-1", "", nil)["enabled"])
+	require.Equal(t, true, handle(t, p, "integration.enabled.get", "ws-2", "", nil)["enabled"])
+	require.Equal(t, false, handle(t, p, "integration.enabled.save", "ws-1", "", map[string]any{"enabled": false})["enabled"])
+	require.Equal(t, false, handle(t, p, "integration.enabled.get", "ws-1", "", nil)["enabled"])
+	require.Equal(t, true, handle(t, p, "integration.enabled.get", "ws-2", "", nil)["enabled"])
+
+	connection := handle(t, p, "connection.get", "ws-1", "", nil)
+	require.Equal(t, "connected", connection["state"])
+}
+
 func TestHandleAction_ConnectionResponsesNeverSerializeAPIKey(t *testing.T) {
 	p, _ := newTestPlugin(t)
 	srv := redmineFixtureServer(t, nil)
@@ -637,6 +652,23 @@ func TestOnEvent_TaskMoved_AutoWritebackEnabled_PushesStatus(t *testing.T) {
 	require.EqualValues(t, 5, pushedStatus)
 }
 
+func TestOnEvent_TaskMoved_DisabledIntegrationSkipsWriteback(t *testing.T) {
+	p, _ := newTestPlugin(t)
+	var pushedStatus any
+	srv := redmineFixtureServer(t, func(statusID any) { pushedStatus = statusID })
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
+	handle(t, p, "link.set", "ws-1", "task-1", map[string]any{"reference": "#42"})
+	require.NoError(t, p.fieldmappingSvc.Save(context.Background(), "ws-1", fieldmapping.Mapping{
+		Statuses: []fieldmapping.StatusMapping{{RedmineStatusID: 5, WorkflowStepID: "step-done"}},
+	}))
+	handle(t, p, "syncoptions.save", "ws-1", "", map[string]any{"auto_status_writeback": true})
+	handle(t, p, "integration.enabled.save", "ws-1", "", map[string]any{"enabled": false})
+
+	err := p.OnEvent(context.Background(), &pluginsdk.Event{EventType: "task.moved", Payload: map[string]any{"task_id": "task-1", "to_step_id": "step-done"}})
+	require.NoError(t, err)
+	require.Nil(t, pushedStatus)
+}
+
 func TestOnEvent_WorkspaceDeleted_CleansPluginStateAfterTaskCascade(t *testing.T) {
 	p, _ := newTestPlugin(t)
 	srv := redmineFixtureServer(t, nil)
@@ -647,6 +679,7 @@ func TestOnEvent_WorkspaceDeleted_CleansPluginStateAfterTaskCascade(t *testing.T
 	_, err := p.watchSvc.CreateWatch(context.Background(), watch.Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
 	require.NoError(t, err)
 	require.NoError(t, p.tasklinkSvc.Set(context.Background(), "task-already-cascaded", "ws-1", 42, "url"))
+	handle(t, p, "integration.enabled.save", "ws-1", "", map[string]any{"enabled": false})
 
 	require.NoError(t, p.OnEvent(context.Background(), &pluginsdk.Event{EventID: "deleted", EventType: "workspace.deleted", WorkspaceID: "ws-1"}))
 	_, found, err := p.connectionSvc.Get(context.Background(), "ws-1")
@@ -658,6 +691,9 @@ func TestOnEvent_WorkspaceDeleted_CleansPluginStateAfterTaskCascade(t *testing.T
 	_, found, err = p.tasklinkSvc.Get(context.Background(), "task-already-cascaded")
 	require.NoError(t, err)
 	require.False(t, found)
+	enabled, err := p.connectionSvc.GetEnabled(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.True(t, enabled, "workspace deletion removes the preference so a reused id gets the safe default")
 }
 
 func TestOnEvent_TaskDeletedIdempotentlyRemovesLink(t *testing.T) {

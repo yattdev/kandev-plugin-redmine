@@ -49,6 +49,29 @@ func TestConnect_ValidKey_PersistsHostManagedSecretAndConnectedState(t *testing.
 	require.Equal(t, StateConnected, got.State)
 }
 
+func TestEnabledPreference_DefaultsTrueAndRoundTripsWithoutDeletingConnection(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	srv := validRedmineServer(t)
+	_, err := svc.Connect(context.Background(), "ws-1", srv.URL, "good-key")
+	require.NoError(t, err)
+
+	enabled, err := svc.GetEnabled(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.True(t, enabled)
+	require.NoError(t, svc.SetEnabled(context.Background(), "ws-1", false))
+	enabled, err = svc.GetEnabled(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.False(t, enabled)
+
+	_, found, err := svc.Get(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	_, found, err = host.GetSecret(context.Background(), secretKey("ws-1"))
+	require.NoError(t, err)
+	require.True(t, found)
+}
+
 func TestConnect_InvalidKey_PersistsNothing(t *testing.T) {
 	host := newFakeHost()
 	svc := New(host)

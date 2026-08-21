@@ -74,6 +74,8 @@ actions:
   - { key: "connection.get", scope: "workspace", max_body_bytes: 8192 }
   - { key: "connection.save", scope: "workspace", max_body_bytes: 8192 }
   - { key: "connection.disconnect", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "integration.enabled.get", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "integration.enabled.save", scope: "workspace", max_body_bytes: 8192 }
   - { key: "projects.list", scope: "workspace", max_body_bytes: 8192 }
   - { key: "projects.save", scope: "workspace", max_body_bytes: 32768 }
   - { key: "workflows.list", scope: "workspace", max_body_bytes: 8192 }

@@ -125,6 +125,10 @@ func (p *HealthPoller) probeAll(ctx context.Context) {
 }
 
 func (p *HealthPoller) probeOne(ctx context.Context, workspaceID string) {
+	enabled, err := p.svc.GetEnabled(ctx, workspaceID)
+	if err != nil || !enabled {
+		return
+	}
 	record, client, found, err := p.svc.clientSnapshot(ctx, workspaceID)
 	if err != nil || !found {
 		return
