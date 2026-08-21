@@ -181,3 +181,10 @@ func TestUnset_IndexFailureRestoresLinkAndReverseIndex(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, "task-1", taskID)
 }
+
+func TestSet_MalformedExistingIndexDoesNotPanic(t *testing.T) {
+	host := newFakeHost()
+	host.state[key(workspaceScope, "ws-1", indexKey)] = map[string]any{"issue_id_to_task_id": "malformed"}
+	svc := New(host)
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+}

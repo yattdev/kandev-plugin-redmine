@@ -152,9 +152,11 @@ func (s *Service) indexSnapshot(ctx context.Context, workspaceID string) (indexS
 	}
 	index := make(map[string]string)
 	if found {
-		for issue, task := range value["issue_id_to_task_id"].(map[string]any) {
-			if id, ok := task.(string); ok {
-				index[issue] = id
+		if raw, ok := value["issue_id_to_task_id"].(map[string]any); ok {
+			for issue, task := range raw {
+				if id, ok := task.(string); ok {
+					index[issue] = id
+				}
 			}
 		}
 	}
