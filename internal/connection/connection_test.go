@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"kandev-plugin-redmine/internal/redmineclient"
@@ -248,4 +249,28 @@ func TestClient_LegacySecretStillWorksWhenBestEffortRewriteFails(t *testing.T) {
 	require.NoError(t, err)
 	_, err = client.ValidateCredentials(context.Background())
 	require.NoError(t, err)
+}
+
+func TestConnect_ConcurrentWorkspacesDoNotLoseIndexEntries(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	srv := validRedmineServer(t)
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, workspaceID := range []string{"ws-1", "ws-2"} {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			_, err := svc.Connect(context.Background(), id, srv.URL, "good-key")
+			errs <- err
+		}(workspaceID)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	ids, err := svc.ListWorkspaceIDs(context.Background())
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"ws-1", "ws-2"}, ids)
 }

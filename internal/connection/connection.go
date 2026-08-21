@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"kandev-plugin-redmine/internal/redmineclient"
@@ -60,6 +61,7 @@ func secretKey(workspaceID string) string {
 type Service struct {
 	host       pluginsdk.Host
 	httpClient *http.Client
+	mu         sync.Mutex
 }
 
 func New(host pluginsdk.Host) *Service {
@@ -74,6 +76,8 @@ func New(host pluginsdk.Host) *Service {
 // unchanged. Also used for key rotation: a repeat Connect call for the same
 // workspace replaces the stored ciphertext under the same composed key.
 func (s *Service) Connect(ctx context.Context, workspaceID, baseURL, apiKey string) (*Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if workspaceID == "" {
 		return nil, errors.New("connection: workspace id is required")
 	}
@@ -159,6 +163,8 @@ func (s *Service) Client(ctx context.Context, workspaceID string) (*redmineclien
 // Disconnect removes both the encrypted secret and the connection state for
 // workspaceID and stops it from being health-polled.
 func (s *Service) Disconnect(ctx context.Context, workspaceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.host.DeleteSecret(ctx, secretKey(workspaceID)); err != nil {
 		return fmt.Errorf("connection: deleting secret: %w", err)
 	}
