@@ -2,6 +2,7 @@ package tasklink
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -18,6 +19,31 @@ func TestSetAndGet_RoundTrips(t *testing.T) {
 	require.Equal(t, 42, link.IssueID)
 	require.Equal(t, "https://redmine.example/issues/42", link.IssueURL)
 	require.Equal(t, "ws-1", link.WorkspaceID)
+}
+
+func TestConcurrentEchoMarkerWritesPreserveStatusAndTitleDescription(t *testing.T) {
+	svc := New(newFakeHost())
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); errs <- svc.RecordPushedStatus(context.Background(), "task-1", 5) }()
+	go func() {
+		defer wg.Done()
+		errs <- svc.RecordPushedTitleAndDescription(context.Background(), "task-1", "Title", "Description")
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	link, found, err := svc.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NotNil(t, link.LastPushedStatusID)
+	require.Equal(t, 5, *link.LastPushedStatusID)
+	require.Equal(t, "Title", link.LastPushedTitle)
+	require.Equal(t, HashDescription("Description"), link.LastPushedDescriptionHash)
 }
 
 func TestGet_NotLinked_ReturnsNotFound(t *testing.T) {

@@ -61,7 +61,7 @@ func (s *Service) Set(ctx context.Context, taskID, workspaceID string, issueID i
 	if existing, ok := index[strconv.Itoa(issueID)]; ok && existing != taskID {
 		return fmt.Errorf("tasklink: Redmine issue %d is already linked to task %s", issueID, existing)
 	}
-	previous, found, err := s.Get(ctx, taskID)
+	previous, found, err := s.getLocked(ctx, taskID)
 	if err != nil {
 		return err
 	}
@@ -79,6 +79,12 @@ func (s *Service) Set(ctx context.Context, taskID, workspaceID string, issueID i
 
 // Get returns the current link for taskID, if any.
 func (s *Service) Get(ctx context.Context, taskID string) (*Link, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getLocked(ctx, taskID)
+}
+
+func (s *Service) getLocked(ctx context.Context, taskID string) (*Link, bool, error) {
 	value, found, err := s.host.GetState(ctx, taskScope, taskID, linkKey)
 	if err != nil {
 		return nil, false, fmt.Errorf("tasklink: reading link: %w", err)
@@ -95,7 +101,7 @@ func (s *Service) Get(ctx context.Context, taskID string) (*Link, bool, error) {
 func (s *Service) Unset(ctx context.Context, taskID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	link, found, err := s.Get(ctx, taskID)
+	link, found, err := s.getLocked(ctx, taskID)
 	if err != nil {
 		return err
 	}
@@ -113,6 +119,8 @@ func (s *Service) Unset(ctx context.Context, taskID string) error {
 // links never resolve into each other, even if both happen to reference the
 // same numeric issue ID on two different Redmine instances.
 func (s *Service) TaskIDForIssue(ctx context.Context, workspaceID string, issueID int) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	index, err := s.index(ctx, workspaceID)
 	if err != nil {
 		return "", false, err
@@ -144,7 +152,9 @@ func (s *Service) ClearWorkspace(ctx context.Context, workspaceID string) error 
 // RecordPushedStatus records the status this plugin itself just pushed
 // outbound, for echo suppression on the next inbound poll.
 func (s *Service) RecordPushedStatus(ctx context.Context, taskID string, statusID int) error {
-	link, found, err := s.Get(ctx, taskID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	link, found, err := s.getLocked(ctx, taskID)
 	if err != nil {
 		return err
 	}
@@ -161,7 +171,9 @@ func (s *Service) RecordPushedStatus(ctx context.Context, taskID string, statusI
 // in the task row itself; no need to keep a second full copy in plugin
 // state).
 func (s *Service) RecordPushedTitleAndDescription(ctx context.Context, taskID, title, description string) error {
-	link, found, err := s.Get(ctx, taskID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	link, found, err := s.getLocked(ctx, taskID)
 	if err != nil {
 		return err
 	}
@@ -177,7 +189,9 @@ func (s *Service) RecordPushedTitleAndDescription(ctx context.Context, taskID, t
 // are intentionally one-shot: a later independent Redmine update back to the
 // same value must not be suppressed forever.
 func (s *Service) ConsumeEcho(ctx context.Context, taskID string, status, title, description bool) error {
-	link, found, err := s.Get(ctx, taskID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	link, found, err := s.getLocked(ctx, taskID)
 	if err != nil || !found {
 		return err
 	}

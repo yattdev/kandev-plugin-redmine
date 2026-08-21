@@ -98,6 +98,14 @@ func (p *redminePlugin) watchWithPlacement(ctx context.Context, workspaceID stri
 	if w.StatusID != nil {
 		w.WorkflowStepID, _ = mapping.WorkflowStepForStatus(*w.StatusID)
 	}
+	w.TrackerLabels = make(map[int]string, len(mapping.Trackers))
+	for _, tracker := range mapping.Trackers {
+		w.TrackerLabels[tracker.RedmineTrackerID] = tracker.TaskLabel
+	}
+	w.PriorityMappings = make(map[int]string, len(mapping.Priorities))
+	for _, priority := range mapping.Priorities {
+		w.PriorityMappings[priority.RedminePriorityID] = priority.TaskPriority
+	}
 	return w, nil
 }
 

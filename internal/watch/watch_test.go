@@ -43,6 +43,28 @@ func TestCreateWatch_ThenPoll_CreatesOneTaskForMatchingIssue(t *testing.T) {
 	}
 }
 
+func TestPoll_CreatesTaskInMappedWorkflowWithPriorityAndTrackerLabel(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	watchObj, err := svc.CreateWatch(context.Background(), Watch{
+		WorkspaceID: "ws-1", WorkflowID: "wf-secondary", WorkflowStepID: "step-triage", ProjectID: 1, Enabled: true,
+		TrackerLabels: map[int]string{3: "bug"}, PriorityMappings: map[int]string{4: "high"},
+	})
+	require.NoError(t, err)
+	issuesSvc := newIssuesService(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"New issue","tracker":{"id":3},"priority":{"id":4}}],"total_count":1}`))
+	})
+	require.NoError(t, svc.Poll(context.Background(), watchObj, issuesSvc))
+	for _, task := range host.tasks {
+		require.Equal(t, "high", task.Priority)
+		require.Equal(t, []string{"bug"}, task.Labels)
+	}
+	require.Len(t, host.creates, 1)
+	require.Equal(t, "wf-secondary", host.creates[0].WorkflowID)
+	require.NotNil(t, host.creates[0].WorkflowStepID)
+	require.Equal(t, "step-triage", *host.creates[0].WorkflowStepID)
+}
+
 func TestPoll_AlreadySeenIssue_CreatesNoSecondTask(t *testing.T) {
 	host := newFakeHost()
 	svc := New(host)

@@ -38,6 +38,7 @@ type Record struct {
 	State     State
 	LastOK    string
 	LastError string
+	Revision  string
 }
 
 const (
@@ -109,7 +110,7 @@ func (s *Service) connectLocked(ctx context.Context, workspaceID, baseURL, apiKe
 		return nil, fmt.Errorf("connection: storing api key: %w", err)
 	}
 
-	record := &Record{BaseURL: normalizedURL, State: StateConnected, LastOK: nowRFC3339()}
+	record := &Record{BaseURL: normalizedURL, State: StateConnected, LastOK: nowRFC3339(), Revision: newRevision()}
 	if err := s.saveRecord(ctx, workspaceID, record); err != nil {
 		_ = s.restoreLocked(ctx, workspaceID, previous)
 		return nil, err
@@ -294,18 +295,28 @@ func (s *Service) saveRecord(ctx context.Context, workspaceID string, record *Re
 func (s *Service) markHealthy(ctx context.Context, workspaceID string, record *Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	record.State = StateConnected
-	record.LastOK = nowRFC3339()
-	record.LastError = ""
-	return s.saveRecord(ctx, workspaceID, record)
+	return s.markHealthLocked(ctx, workspaceID, record.Revision, StateConnected, "")
 }
 
 func (s *Service) markDegraded(ctx context.Context, workspaceID string, record *Record, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	record.State = StateDegraded
-	record.LastError = reason
-	return s.saveRecord(ctx, workspaceID, record)
+	return s.markHealthLocked(ctx, workspaceID, record.Revision, StateDegraded, reason)
+}
+
+func (s *Service) markHealthLocked(ctx context.Context, workspaceID, revision string, state State, reason string) error {
+	current, found, err := s.getLocked(ctx, workspaceID)
+	if err != nil || !found || current.Revision != revision {
+		return err
+	}
+	current.State = state
+	if state == StateConnected {
+		current.LastOK = nowRFC3339()
+		current.LastError = ""
+	} else {
+		current.LastError = reason
+	}
+	return s.saveRecord(ctx, workspaceID, current)
 }
 
 // decryptedAPIKey resolves and decrypts the stored API key for workspaceID.
@@ -395,6 +406,9 @@ func (r *Record) toMap() map[string]any {
 	if r.LastError != "" {
 		m["last_error"] = r.LastError
 	}
+	if r.Revision != "" {
+		m["revision"] = r.Revision
+	}
 	return m
 }
 
@@ -412,7 +426,12 @@ func recordFromMap(m map[string]any) *Record {
 	if v, ok := m["last_error"].(string); ok {
 		r.LastError = v
 	}
+	if v, ok := m["revision"].(string); ok {
+		r.Revision = v
+	}
 	return r
 }
 
 func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
+
+func newRevision() string { return fmt.Sprintf("%d", time.Now().UnixNano()) }

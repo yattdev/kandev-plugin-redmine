@@ -42,6 +42,8 @@ type Watch struct {
 	ProjectID        int
 	TrackerID        *int
 	StatusID         *int
+	TrackerLabels    map[int]string
+	PriorityMappings map[int]string
 	MaxInflightTasks int // 0 = unlimited
 	Enabled          bool
 }
@@ -220,6 +222,10 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 }
 
 func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) error {
+	labels := []string(nil)
+	if label := w.TrackerLabels[issue.TrackerID]; label != "" {
+		labels = []string{label}
+	}
 	task, err := s.host.Tasks().Create(ctx, pluginsdk.CreateTaskInput{
 		WorkspaceID: w.WorkspaceID,
 		WorkflowID:  w.WorkflowID,
@@ -232,6 +238,8 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 		}(),
 		Title:       fmt.Sprintf("Redmine #%d: %s", issue.ID, issue.Subject),
 		Description: issue.Description,
+		Priority:    w.PriorityMappings[issue.PriorityID],
+		Labels:      labels,
 		Metadata: map[string]any{
 			metadataKeyWatchID: w.ID,
 			metadataKeyIssueID: issue.ID,
@@ -378,6 +386,12 @@ func (w Watch) toMap() map[string]any {
 	if w.StatusID != nil {
 		m["status_id"] = *w.StatusID
 	}
+	if len(w.TrackerLabels) > 0 {
+		m["tracker_labels"] = intStringMap(w.TrackerLabels)
+	}
+	if len(w.PriorityMappings) > 0 {
+		m["priority_mappings"] = intStringMap(w.PriorityMappings)
+	}
 	return m
 }
 
@@ -409,7 +423,31 @@ func watchFromMap(workspaceID string, m map[string]any) Watch {
 		id := int(v)
 		w.StatusID = &id
 	}
+	w.TrackerLabels = stringMapToIntMap(m["tracker_labels"])
+	w.PriorityMappings = stringMapToIntMap(m["priority_mappings"])
 	return w
+}
+
+func intStringMap(input map[int]string) map[string]any {
+	out := make(map[string]any, len(input))
+	for id, value := range input {
+		out[strconv.Itoa(id)] = value
+	}
+	return out
+}
+
+func stringMapToIntMap(value any) map[int]string {
+	raw, _ := value.(map[string]any)
+	out := make(map[int]string, len(raw))
+	for id, mapped := range raw {
+		parsed, err := strconv.Atoi(id)
+		if err == nil {
+			if text, ok := mapped.(string); ok {
+				out[parsed] = text
+			}
+		}
+	}
+	return out
 }
 
 func newWatchID() (string, error) {
