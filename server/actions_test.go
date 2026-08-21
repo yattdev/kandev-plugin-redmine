@@ -310,6 +310,71 @@ func TestHandleAction_WatchesRejectForgedInvalidOrUnselectedInputs(t *testing.T)
 	require.Contains(t, out["error"], "not selected")
 }
 
+func TestHandleAction_WatchesValidateLiveFiltersAndSelectedProject(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/current.json":
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case "/projects.json":
+			_, _ = w.Write([]byte(`{"projects":[{"id":1,"name":"One"}],"total_count":1}`))
+		case "/trackers.json":
+			_, _ = w.Write([]byte(`{"trackers":[{"id":3,"name":"Bug"}]}`))
+		case "/issue_statuses.json":
+			_, _ = w.Write([]byte(`{"issue_statuses":[{"id":4,"name":"Open"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	p, _ := newTestPlugin()
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
+	require.NoError(t, p.fieldmappingSvc.Save(context.Background(), "ws-1", fieldmapping.Mapping{WorkflowID: "wf-1"}))
+	valid := handle(t, p, "watches.create", "ws-1", "", map[string]any{"project_id": 1, "tracker_id": 3, "status_id": 4, "max_inflight_tasks": 0, "enabled": true})
+	require.NotEmpty(t, valid["id"])
+	for _, body := range []map[string]any{
+		{"project_id": 1, "tracker_id": 99, "max_inflight_tasks": 0},
+		{"project_id": 1, "status_id": 99, "max_inflight_tasks": 0},
+		{"project_id": 1, "max_inflight_tasks": -1},
+		{"project_id": 2, "max_inflight_tasks": 0},
+	} {
+		require.NotEmpty(t, handle(t, p, "watches.create", "ws-1", "", body)["error"])
+	}
+}
+
+func TestHandleAction_FieldMappingSaveValidatesAndNormalizesLiveValues(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/current.json":
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case "/issue_statuses.json":
+			_, _ = w.Write([]byte(`{"issue_statuses":[{"id":1,"name":"Server Open","is_closed":false}]}`))
+		case "/trackers.json":
+			_, _ = w.Write([]byte(`{"trackers":[{"id":2,"name":"Server Bug"}]}`))
+		case "/enumerations/issue_priorities.json":
+			_, _ = w.Write([]byte(`{"issue_priorities":[{"id":3,"name":"Server High"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	p, _ := newTestPlugin()
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+	base := map[string]any{"workflow_id": "wf-1", "statuses": []any{map[string]any{"redmine_status_id": 1, "redmine_name": "forged", "is_closed": true, "workflow_step_id": "step-done"}}, "trackers": []any{map[string]any{"redmine_tracker_id": 2, "redmine_name": "forged", "task_label": "  bug  "}}, "priorities": []any{map[string]any{"redmine_priority_id": 3, "redmine_name": "forged", "task_priority": "high"}}}
+	require.Equal(t, true, handle(t, p, "fieldmapping.save", "ws-1", "", base)["saved"])
+	mapping, found, err := p.fieldmappingSvc.Get(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "Server Open", mapping.Statuses[0].RedmineName)
+	require.False(t, mapping.Statuses[0].IsClosed)
+	require.Equal(t, "bug", mapping.Trackers[0].TaskLabel)
+	require.Equal(t, "Server High", mapping.Priorities[0].RedmineName)
+	duplicate := map[string]any{"workflow_id": "wf-1", "statuses": []any{map[string]any{"redmine_status_id": 1}, map[string]any{"redmine_status_id": 1}}}
+	require.NotEmpty(t, handle(t, p, "fieldmapping.save", "ws-1", "", duplicate)["error"])
+	invalidPriority := map[string]any{"workflow_id": "wf-1", "priorities": []any{map[string]any{"redmine_priority_id": 3, "task_priority": "urgent"}}}
+	require.NotEmpty(t, handle(t, p, "fieldmapping.save", "ws-1", "", invalidPriority)["error"])
+}
+
 func TestHandleAction_SyncOptionsGetRoundTripsAndPreservesOtherToggle(t *testing.T) {
 	p, _ := newTestPlugin()
 	handle(t, p, "syncoptions.save", "ws-1", "", map[string]any{"auto_status_writeback": true, "sync_title_description": false})
