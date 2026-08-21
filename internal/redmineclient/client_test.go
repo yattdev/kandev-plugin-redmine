@@ -94,6 +94,9 @@ func TestNormalizeBaseURL_RejectsUnsafeFormsAndPreservesSubpath(t *testing.T) {
 	got, err := redmineclient.NormalizeBaseURL(" https://redmine.example/redmine/ ")
 	require.NoError(t, err)
 	require.Equal(t, "https://redmine.example/redmine", got)
+	got, err = redmineclient.NormalizeBaseURL("https://redmine.example/redmine%20space/")
+	require.NoError(t, err)
+	require.Equal(t, "https://redmine.example/redmine%20space", got)
 	for _, raw := range []string{"ftp://redmine.example", "https://user:pass@redmine.example", "https://redmine.example/?x=1", "https://redmine.example/#fragment", "/relative"} {
 		_, err := redmineclient.NormalizeBaseURL(raw)
 		require.Error(t, err, raw)

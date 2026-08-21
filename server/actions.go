@@ -297,7 +297,7 @@ func (p *redminePlugin) resolveCustomFields(ctx context.Context, client *redmine
 	for i, issue := range result.Issues {
 		fields := make([]fieldmapping.CustomField, len(issue.CustomFields))
 		for j, f := range issue.CustomFields {
-			fields[j] = fieldmapping.CustomField{ID: f.ID}
+			fields[j] = fieldmapping.CustomField{ID: f.ID, Name: f.Name}
 		}
 		perIssue[i] = fields
 	}

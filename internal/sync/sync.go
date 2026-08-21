@@ -180,17 +180,19 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 			changed = true
 		}
 	}
-	if statusEcho || titleEcho || descriptionEcho {
-		if err := s.tasklink.ConsumeEcho(ctx, taskID, statusEcho, titleEcho, descriptionEcho); err != nil {
-			return err
-		}
-	}
-
 	if !changed {
+		if statusEcho || titleEcho || descriptionEcho {
+			return s.tasklink.ConsumeEcho(ctx, taskID, statusEcho, titleEcho, descriptionEcho)
+		}
 		return nil
 	}
 	if _, err := s.host.Tasks().Update(ctx, update); err != nil {
 		return fmt.Errorf("sync: applying inbound update to task %s: %w", taskID, err)
+	}
+	if statusEcho || titleEcho || descriptionEcho {
+		if err := s.tasklink.ConsumeEcho(ctx, taskID, statusEcho, titleEcho, descriptionEcho); err != nil {
+			return err
+		}
 	}
 	return nil
 }

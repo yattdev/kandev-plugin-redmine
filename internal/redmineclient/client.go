@@ -30,6 +30,7 @@ const defaultHTTPTimeout = 15 * time.Second
 const (
 	maxRetryAttempts = 3
 	retryBaseDelay   = 50 * time.Millisecond
+	maxRetryDelay    = 1 * time.Second
 )
 
 // NormalizeBaseURL accepts only an HTTP(S) origin or an HTTP(S) origin with a
@@ -46,7 +47,7 @@ func NormalizeBaseURL(raw string) (string, error) {
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return "", fmt.Errorf("redmineclient: base URL must not include credentials, query, or fragment")
 	}
-	u.Path = strings.TrimRight(u.EscapedPath(), "/")
+	u.Path = strings.TrimRight(u.Path, "/")
 	u.RawPath = ""
 	return strings.TrimRight(u.String(), "/"), nil
 }
@@ -173,12 +174,16 @@ func retryableStatus(status int) bool { return status == http.StatusTooManyReque
 
 func retryDelay(resp *http.Response, attempt int) time.Duration {
 	if resp != nil {
-		if seconds, err := time.ParseDuration(resp.Header.Get("Retry-After") + "s"); err == nil && seconds > 0 {
-			return seconds
+		retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After"))
+		if seconds, err := time.ParseDuration(retryAfter + "s"); err == nil && seconds > 0 {
+			return min(seconds, maxRetryDelay)
+		}
+		if when, err := http.ParseTime(retryAfter); err == nil {
+			return min(max(time.Until(when), 0), maxRetryDelay)
 		}
 	}
 	delay := retryBaseDelay << attempt
-	return delay/2 + time.Duration(rand.Int63n(int64(delay/2)+1)) //nolint:gosec // retry jitter is not security-sensitive
+	return min(delay/2+time.Duration(rand.Int63n(int64(delay/2)+1)), maxRetryDelay) //nolint:gosec // retry jitter is not security-sensitive
 }
 
 func waitForRetry(ctx context.Context, delay time.Duration) error {
