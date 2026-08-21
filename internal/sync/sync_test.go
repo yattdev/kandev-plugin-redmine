@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -155,6 +156,10 @@ func TestPushWriteback_MappedStepChange_IssuesPUTAndRecordsEchoSuppression(t *te
 
 	var putStatusID any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"issue":{"id":42,"status":{"id":1}}}`))
+			return
+		}
 		require.Equal(t, http.MethodPut, r.Method)
 		var body map[string]any
 		_ = readJSONBody(r, &body)
@@ -241,6 +246,39 @@ func TestEchoSuppression_WriteBackThenInboundPoll_DoesNotBounceTask(t *testing.T
 
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
 	require.Empty(t, host.updateCalls(), "the inbound poll observing our own pushed status must not re-apply/bounce the task")
+}
+
+func TestPushWriteback_DuplicateAfterEchoConsumptionReadsLiveStatusAndSkipsPUT(t *testing.T) {
+	host := newFakeHost()
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	putCount := 0
+	redmineStatus := 1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if r.URL.Path == "/issues/42.json" {
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"issue":{"id":42,"status":{"id":%d}}}`, redmineStatus)))
+				return
+			}
+			_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"s","status":{"id":2},"updated_on":"2026-01-01T00:00:00Z"}],"total_count":1}`))
+		case http.MethodPut:
+			putCount++
+			redmineStatus = 2
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
+
+	// First event writes, inbound consumes its one-shot marker, then a
+	// duplicate event observes Redmine already has the desired status.
+	require.NoError(t, svc.PushWriteback(context.Background(), "task-1", "step-done", testMapping(), issuesSvc, Options{AutoStatusWriteback: true}))
+	require.Equal(t, 1, putCount)
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
+	require.NoError(t, svc.PushWriteback(context.Background(), "task-1", "step-done", testMapping(), issuesSvc, Options{AutoStatusWriteback: true}))
+	require.Equal(t, 1, putCount)
 }
 
 func TestSaveAndGetOptions_RoundTrip(t *testing.T) {

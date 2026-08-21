@@ -245,6 +245,16 @@ func (s *Service) forceWriteback(ctx context.Context, taskID string, statusID in
 	if link.LastPushedStatusID != nil && *link.LastPushedStatusID == statusID {
 		return nil
 	}
+	// Echo markers are intentionally one-shot. Once inbound polling consumes
+	// one, a redelivered task.moved must still not issue a second PUT when
+	// Redmine already reflects the requested status.
+	issue, err := issuesSvc.GetIssue(ctx, link.IssueID)
+	if err != nil {
+		return fmt.Errorf("sync: reading issue %d before write-back: %w", link.IssueID, err)
+	}
+	if issue.StatusID == statusID {
+		return nil
+	}
 	if err := issuesSvc.UpdateIssue(ctx, link.IssueID, issues.IssueWrite{StatusID: statusID}); err != nil {
 		return fmt.Errorf("sync: writing back status for task %s: %w", taskID, err)
 	}
