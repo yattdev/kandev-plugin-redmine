@@ -1,19 +1,17 @@
 # kandev-plugin-redmine
 
-A [kandev](https://github.com/kdlbs/kandev) **native-UI plugin** connecting a
+A Kandev **native-UI plugin** connecting a
 Redmine instance to kandev: link tasks to Redmine issues, sync status both
 ways, and watch for new issues. Bootstrapped from
-[`kandev-plugin-template`](https://github.com/kdlbs/kandev-plugin-template);
-see [`docs/specs/redmine-plugin/spec.md`](https://github.com/kdlbs/kandev/blob/main/docs/specs/redmine-plugin/spec.md)
-and [`docs/plans/redmine-plugin/plan.md`](https://github.com/kdlbs/kandev/blob/main/docs/plans/redmine-plugin/plan.md)
-in `kdlbs/kandev` for the full design and task breakdown.
+`kandev-plugin-template`; the authoritative plugin specification and
+verification trace is [docs/spec.md](docs/spec.md).
 
 - **Connection** — API-key auth (`X-Redmine-API-Key`) only, one connection per
   kandev workspace, validated against `GET /users/current.json`. The key is
-  encrypted with workspace-derived key material and stored under a
-  plugin-composed secret key (`redmine:<workspace_id>:api_key`), since the
-  host's `GetSecret`/`SetSecret` RPCs are namespaced only by plugin ID, not by
-  workspace.
+  passed as plaintext only to the SDK's host-managed encrypted secret store.
+  The plugin uses a dot-safe composed key (`redmine.<workspace_id>.api_key`).
+  Existing v0.1 plugin-encrypted values are dual-read and migrated on read;
+  new values never use plugin-side encryption.
 - **Own health polling** — no host `healthpoll` equivalent exists for plugins;
   this plugin runs its own ~90s jittered probe per connected workspace.
 - **Project and field mapping** — statuses, trackers, and priorities are always
@@ -69,11 +67,10 @@ calls into this plugin from the outside.
 
 ## Minimum host version
 
-`manifest.yaml` declares `min_kandev_version: "0.88.0"` — the first release
-containing `kdlbs/kandev` PR #2117's generic plugin seams this plugin depends
-on (`registerIntegrationSettings`, `registerTaskAction({placement:"link"})`,
-`reference_sources`, the `PluginOwnedTaskTrees` RPCs). A release host compares
-this against its own version at install time and refuses an older one.
+The final `min_kandev_version` is intentionally deferred until the Kandev
+release containing the generic task priority/labels write contract is known.
+The plugin's candidate build is tested against that host change locally; do
+not treat the currently committed manifest floor as the release decision.
 
 It is **release-only by design**: a host built from a git checkout reports a
 git-describe version like `v0.87.1-27-g4705f1fd0`, which isn't a release

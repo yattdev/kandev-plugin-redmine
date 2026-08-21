@@ -432,6 +432,7 @@ function makeSettingsComponent(host) {
                 { key: tracker.id, className: "flex items-center gap-2" },
                 h("span", { className: "w-32 text-sm" }, tracker.name),
                 h(Input, {
+                  "data-testid": "redmine-tracker-label-" + tracker.id,
                   value: trackerLabels[tracker.id] || "",
                   onChange: (e) => setTrackerLabels({ ...trackerLabels, [tracker.id]: e.target.value }),
                   placeholder: "label",
@@ -455,6 +456,7 @@ function makeSettingsComponent(host) {
                 h(
                   Select,
                   {
+                    "data-testid": "redmine-priority-map-" + priority.id,
                     value: priorityMap[priority.id] || "medium",
                     onValueChange: (value) => setPriorityMap({ ...priorityMap, [priority.id]: value }),
                   },
