@@ -1,5 +1,5 @@
-// Package secretcrypto encrypts the Redmine API key with workspace-derived
-// key material before it is handed to the host's SetSecret RPC. The host's
+// Package secretcrypto reads the deprecated v0.1 plugin-side envelope solely
+// for migration. New API keys go directly to the host's SetSecret RPC. The host's
 // plugin secret store is namespaced only by plugin ID
 // (plugin:<id>:secret:<key>), not by workspace, so internal/connection
 // composes the workspace ID into the secret *key* itself
@@ -61,7 +61,8 @@ func newGCM(workspaceID string) (cipher.AEAD, error) {
 	return gcm, nil
 }
 
-// Encrypt returns plaintext encrypted under a key derived from workspaceID,
+// Encrypt returns plaintext encrypted under a key derived from workspaceID.
+// Deprecated: only legacy migration tests should call this.
 // base64-encoded (nonce prepended). Two calls with identical inputs produce
 // different output (random nonce per call).
 func Encrypt(workspaceID, plaintext string) (string, error) {
@@ -77,7 +78,7 @@ func Encrypt(workspaceID, plaintext string) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// Decrypt reverses Encrypt. It fails if workspaceID does not match the one
+// Decrypt reverses the legacy Encrypt format. It fails if workspaceID does not match the one
 // Encrypt was called with, or if encoded was tampered with.
 func Decrypt(workspaceID, encoded string) (string, error) {
 	gcm, err := newGCM(workspaceID)

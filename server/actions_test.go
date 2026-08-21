@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -88,6 +90,53 @@ func TestHandleAction_ConnectionSave_InvalidKey_ReturnsClassifiedError(t *testin
 
 	out := handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "bad-key"})
 	require.Equal(t, "invalid_credentials", out["kind"])
+}
+
+func TestHandleAction_IssueUploadAndCreateExposeFullWriteContract(t *testing.T) {
+	var uploadFilename, uploadContentType string
+	var uploadBody []byte
+	var createBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/current.json":
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case "/uploads.json":
+			uploadFilename = r.URL.Query().Get("filename")
+			uploadContentType = r.Header.Get("Content-Type")
+			uploadBody, _ = io.ReadAll(r.Body)
+			_, _ = w.Write([]byte(`{"upload":{"token":"upload-token"}}`))
+		case "/issues.json":
+			_ = json.NewDecoder(r.Body).Decode(&createBody)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"issue":{"id":77,"subject":"Created"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	p, _ := newTestPlugin()
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+	upload := handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "note.txt", "content_type": "text/plain", "content_base64": base64.StdEncoding.EncodeToString([]byte("hello"))})
+	require.Equal(t, "upload-token", upload["token"])
+	require.Equal(t, "note.txt", uploadFilename)
+	require.Equal(t, "text/plain", uploadContentType)
+	require.Equal(t, "hello", string(uploadBody))
+
+	created := handle(t, p, "issues.create", "ws-1", "", map[string]any{"project_id": 1, "tracker_id": 2, "status_id": 3, "priority_id": 4, "subject": "Created", "description": "Body", "custom_fields": []any{map[string]any{"id": 9, "name": "Tier", "value": "Gold"}}, "uploads": []any{map[string]any{"token": upload["token"], "filename": "note.txt", "content_type": "text/plain"}}})
+	require.EqualValues(t, 77, created["id"])
+	issue, ok := createBody["issue"].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, 1, issue["project_id"])
+	require.Equal(t, "Created", issue["subject"])
+	require.Len(t, issue["uploads"], 1)
+}
+
+func TestHandleAction_IssueUploadRejectsInvalidInput(t *testing.T) {
+	p, _ := newTestPlugin()
+	out := handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "", "content_base64": "aGVsbG8="})
+	require.Contains(t, out["error"], "filename")
+	out = handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "x", "content_base64": "not-base64"})
+	require.Contains(t, out["error"], "invalid")
 }
 
 func TestHandleAction_ProjectsSaveThenList_PersistsSelection(t *testing.T) {

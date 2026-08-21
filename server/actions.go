@@ -54,6 +54,12 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleFieldMappingSave(ctx, req)
 	case "syncoptions.save":
 		return p.handleSyncOptionsSave(ctx, req)
+	case "issues.create":
+		return p.handleIssueCreate(ctx, req)
+	case "issues.update":
+		return p.handleIssueUpdate(ctx, req)
+	case "issues.upload":
+		return p.handleIssueUpload(ctx, req)
 	case "link.get":
 		return p.handleLinkGet(ctx, req)
 	case "link.set":

@@ -90,11 +90,10 @@ func (s *Service) Connect(ctx context.Context, workspaceID, baseURL, apiKey stri
 		return nil, err
 	}
 
-	encrypted, err := secretcrypto.Encrypt(workspaceID, apiKey)
-	if err != nil {
-		return nil, fmt.Errorf("connection: encrypting api key: %w", err)
-	}
-	if err := s.host.SetSecret(ctx, secretKey(workspaceID), encrypted); err != nil {
+	// SetSecret is the confidentiality boundary. Do not add a workspace-ID
+	// derived cipher here: workspace IDs are not secret and the host owns key
+	// management, rotation, and recovery.
+	if err := s.host.SetSecret(ctx, secretKey(workspaceID), apiKey); err != nil {
 		return nil, fmt.Errorf("connection: storing api key: %w", err)
 	}
 
@@ -260,7 +259,15 @@ func (s *Service) decryptedAPIKey(ctx context.Context, workspaceID string) (stri
 	if !found {
 		return "", errors.New("connection: no api key stored for workspace")
 	}
-	return secretcrypto.Decrypt(workspaceID, encrypted)
+	// v0.1 stored a plugin-encrypted value. Read it once for upgrade
+	// compatibility, then rewrite plaintext through the host secret store.
+	if legacy, legacyErr := secretcrypto.Decrypt(workspaceID, encrypted); legacyErr == nil {
+		if err := s.host.SetSecret(ctx, secretKey(workspaceID), legacy); err != nil {
+			return "", fmt.Errorf("connection: migrating legacy secret: %w", err)
+		}
+		return legacy, nil
+	}
+	return encrypted, nil
 }
 
 func (r *Record) toMap() map[string]any {
