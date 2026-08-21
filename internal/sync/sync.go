@@ -1,13 +1,9 @@
 // Package sync owns the cursor-based inbound polling loop and the opt-in
 // outbound write-back, wired to internal/tasklink for echo suppression.
 //
-// Write-back has two entry points that share PushWriteback: the OnEvent
-// "task.moved" handler (server/plugin.go) for near-real-time delivery, and
-// this package's own reconciliation pass over linked tasks (called from the
-// same ticker as PollInbound) as a backstop — OnEvent delivery is
-// best-effort (bounded in-memory queue, lost on backend restart or sustained
-// overload per the plugin host's delivery contract), so a missed event still
-// converges on the next poll instead of leaving the write-back stuck.
+// Write-back is outbound only and is initiated by server/plugin.go's
+// task.moved event handler or the manual status action. PollInbound does not
+// reconcile missed outbound events; it only applies Redmine changes inbound.
 package sync
 
 import (
@@ -234,7 +230,7 @@ func applyTitleAndDescription(update *pluginsdk.UpdateTaskInput, issue issues.Is
 // enabled. A no-op when the task isn't linked, the step has no mapping, the
 // option is disabled, or the mapped status already matches what was last
 // pushed (idempotent against a duplicate task.moved delivery or a
-// reconciliation poll re-observing the same, already-applied state).
+// duplicate task.moved delivery re-observing the same, already-applied state).
 func (s *Service) PushWriteback(ctx context.Context, taskID, toWorkflowStepID string, mapping fieldmapping.Mapping, issuesSvc *issues.Service, opts Options) error {
 	if !opts.AutoStatusWriteback {
 		return nil

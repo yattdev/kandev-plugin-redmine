@@ -4,6 +4,13 @@ import { readFile } from "node:fs/promises";
 
 const bundle = await readFile(new URL("./bundle.js", import.meta.url), "utf8");
 
+async function loadBundleTestHooks() {
+  globalThis.window = { registerKandevPlugin() {} };
+  const source = `${bundle}\nglobalThis.__redmineBundleTestHooks = { createSyncSaveController, workspaceActionInvoke, taskActionInvoke };`;
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  return globalThis.__redmineBundleTestHooks;
+}
+
 test("mapping selects use a nonempty unmapped sentinel and save empty mappings", () => {
   assert.match(bundle, /const unmappedValue = "__unmapped__"/);
   assert.match(bundle, /value === unmappedValue \? "" : value/);
@@ -62,4 +69,47 @@ test("manual status uses workspace scope for field mappings and task scope for l
     { key: "link.get", context: { workspaceId: "workspace-1", taskId: "task-1", body: {} } },
     { key: "fieldmapping.get", context: { workspaceId: "workspace-1", body: {} } },
   ]);
+});
+
+test("sync saves roll back and toast without an unhandled rejection", async () => {
+  const { createSyncSaveController } = await loadBundleTestHooks();
+  const applied = [];
+  const toasts = [];
+  const controller = createSyncSaveController(
+    async () => { throw new Error("save rejected"); },
+    "workspace-1",
+    { error(message) { toasts.push(message); } },
+    (next) => applied.push(next),
+    () => {},
+  );
+  controller.setOptions({ autoStatusWriteback: false, syncTitleDescription: true });
+  assert.equal(await controller.update("autoStatusWriteback", true), false);
+  assert.deepEqual(applied, [
+    { autoStatusWriteback: true, syncTitleDescription: true },
+    { autoStatusWriteback: false, syncTitleDescription: true },
+  ]);
+  assert.deepEqual(toasts, ["save rejected"]);
+});
+
+test("sync saves are serialized and use workspace-only action context", async () => {
+  const { createSyncSaveController, workspaceActionInvoke } = await loadBundleTestHooks();
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  const controller = createSyncSaveController(
+    async (key, workspaceId, body) => { calls.push({ key, workspaceId, body }); await pending; },
+    "workspace-1",
+    { error() {} },
+    () => {},
+    () => {},
+  );
+  const first = controller.update("autoStatusWriteback", true);
+  assert.equal(await controller.update("syncTitleDescription", true), false);
+  release();
+  assert.equal(await first, true);
+  assert.deepEqual(calls, [{ key: "syncoptions.save", workspaceId: "workspace-1", body: { auto_status_writeback: true, sync_title_description: false } }]);
+
+  const contexts = [];
+  await workspaceActionInvoke({ api: { invokeAction: async (_key, context) => { contexts.push(context); return {}; } } }, "projects.save", { workspaceId: "workspace-1", taskId: "must-not-send" }, {});
+  assert.deepEqual(contexts, [{ workspaceId: "workspace-1", body: {} }]);
 });

@@ -86,6 +86,40 @@ function taskActionInvoke(host, key, context, body) {
   return actionInvoke(host, key, { workspaceId: context.workspaceId, taskId: context.taskId }, body);
 }
 
+// The controller serializes option writes. Keeping this outside the React
+// component makes its failure rollback behavior testable without a browser.
+function createSyncSaveController(invoke, workspaceId, toast, apply, setSaving) {
+  let options = { autoStatusWriteback: false, syncTitleDescription: false };
+  let pending = false;
+  return {
+    setOptions(next) { options = next; },
+    async update(key, value) {
+      if (pending) return false;
+      const prior = options;
+      const next = { ...prior, [key]: value };
+      pending = true;
+      setSaving(true);
+      options = next;
+      apply(next);
+      try {
+        await invoke("syncoptions.save", workspaceId, {
+          auto_status_writeback: next.autoStatusWriteback,
+          sync_title_description: next.syncTitleDescription,
+        });
+        return true;
+      } catch (err) {
+        options = prior;
+        apply(prior);
+        toast.error(err && err.message ? err.message : String(err));
+        return false;
+      } finally {
+        pending = false;
+        setSaving(false);
+      }
+    },
+  };
+}
+
 function makeSetRedmineStatusAction(host) {
   const h = host.jsx;
   return {
@@ -284,6 +318,7 @@ function makeSettingsComponent(host) {
     const [loading, setLoading] = React.useState(true);
     const [projects, setProjects] = React.useState([]);
     const [selected, setSelected] = React.useState(new Set());
+    const [saving, setSaving] = React.useState(false);
 
     const load = React.useCallback(async () => {
       if (!connected) {
@@ -317,8 +352,16 @@ function makeSettingsComponent(host) {
     };
 
     const onSave = async () => {
-      await invoke("projects.save", workspaceId, { project_ids: Array.from(selected) });
-      toast.success("Project selection saved.");
+      if (saving) return;
+      setSaving(true);
+      try {
+        await invoke("projects.save", workspaceId, { project_ids: Array.from(selected) });
+        toast.success("Project selection saved.");
+      } catch (err) {
+        toast.error(errorMessage(err));
+      } finally {
+        setSaving(false);
+      }
     };
 
     return h(
@@ -347,7 +390,7 @@ function makeSettingsComponent(host) {
               ),
             ),
       ),
-      h(CardFooter, null, h(Button, { id: "redmine-projects-save", onClick: onSave }, "Save projects")),
+      h(CardFooter, null, h(Button, { id: "redmine-projects-save", "data-testid": "redmine-projects-save", disabled: saving, onClick: onSave }, saving ? "Saving…" : "Save projects")),
     );
   }
 
@@ -362,6 +405,7 @@ function makeSettingsComponent(host) {
     const [statusSteps, setStatusSteps] = React.useState({});
     const [trackerLabels, setTrackerLabels] = React.useState({});
     const [priorityMap, setPriorityMap] = React.useState({});
+    const [saving, setSaving] = React.useState(false);
 
     const load = React.useCallback(async () => {
       if (!connected) {
@@ -414,6 +458,7 @@ function makeSettingsComponent(host) {
     const allSteps = (selectedWorkflow && selectedWorkflow.steps) || [];
 
     const onSave = async () => {
+      if (saving) return;
       const statuses = (live.live_statuses || []).map((s) => ({
         redmine_status_id: s.id,
         redmine_name: s.name,
@@ -430,8 +475,15 @@ function makeSettingsComponent(host) {
         redmine_name: p.name,
         task_priority: priorityMap[p.id] || "",
       }));
-      await invoke("fieldmapping.save", workspaceId, { workflow_id: workflowId, statuses, trackers, priorities });
-      toast.success("Field mapping saved.");
+      setSaving(true);
+      try {
+        await invoke("fieldmapping.save", workspaceId, { workflow_id: workflowId, statuses, trackers, priorities });
+        toast.success("Field mapping saved.");
+      } catch (err) {
+        toast.error(errorMessage(err));
+      } finally {
+        setSaving(false);
+      }
     };
 
     return h(
@@ -553,7 +605,7 @@ function makeSettingsComponent(host) {
           live.custom_fields_derived ? h("p", { className: "text-muted-foreground text-xs", id: "redmine-custom-fields-derived-note" }, "Custom fields were derived from recent issues because this API key cannot list them.") : null,
         ),
       ),
-      h(CardFooter, null, h(Button, { id: "redmine-fieldmapping-save", onClick: onSave }, "Save mapping")),
+      h(CardFooter, null, h(Button, { id: "redmine-fieldmapping-save", "data-testid": "redmine-fieldmapping-save", disabled: saving, onClick: onSave }, saving ? "Saving…" : "Save mapping")),
     );
   }
 
@@ -563,24 +615,33 @@ function makeSettingsComponent(host) {
     const [autoStatusWriteback, setAutoStatusWriteback] = React.useState(false);
     const [syncTitleDescription, setSyncTitleDescription] = React.useState(false);
     const [loading, setLoading] = React.useState(true);
+    const [saving, setSaving] = React.useState(false);
+    const controller = React.useRef(null);
+    if (!controller.current) {
+      controller.current = createSyncSaveController(
+        invoke,
+        workspaceId,
+        toast,
+        (next) => {
+          setAutoStatusWriteback(next.autoStatusWriteback);
+          setSyncTitleDescription(next.syncTitleDescription);
+        },
+        setSaving,
+      );
+    }
 
     React.useEffect(() => {
       if (!connected) { setLoading(false); return; }
       let active = true;
       invoke("syncoptions.get", workspaceId, {}).then((options) => {
         if (!active) return;
-        setAutoStatusWriteback(Boolean(options.auto_status_writeback));
-        setSyncTitleDescription(Boolean(options.sync_title_description));
+        const next = { autoStatusWriteback: Boolean(options.auto_status_writeback), syncTitleDescription: Boolean(options.sync_title_description) };
+        controller.current.setOptions(next);
+        setAutoStatusWriteback(next.autoStatusWriteback);
+        setSyncTitleDescription(next.syncTitleDescription);
       }).catch((err) => toast.error(errorMessage(err))).finally(() => { if (active) setLoading(false); });
       return () => { active = false; };
     }, [workspaceId, connected]);
-
-    const save = async (next) => {
-      await invoke("syncoptions.save", workspaceId, {
-        auto_status_writeback: next.autoStatusWriteback,
-        sync_title_description: next.syncTitleDescription,
-      });
-    };
 
     if (!connected) return null;
     if (loading) return h(Spinner, { id: "redmine-syncoptions-loading", "data-testid": "redmine-syncoptions-loading" });
@@ -604,9 +665,9 @@ function makeSettingsComponent(host) {
             id: "redmine-auto-writeback",
             "data-testid": "redmine-auto-writeback",
             checked: autoStatusWriteback,
+            disabled: saving,
             onCheckedChange: (checked) => {
-              setAutoStatusWriteback(checked);
-              save({ autoStatusWriteback: checked, syncTitleDescription });
+              controller.current.update("autoStatusWriteback", checked);
             },
           }),
         ),
@@ -622,9 +683,9 @@ function makeSettingsComponent(host) {
             id: "redmine-sync-title",
             "data-testid": "redmine-sync-title",
             checked: syncTitleDescription,
+            disabled: saving,
             onCheckedChange: (checked) => {
-              setSyncTitleDescription(checked);
-              save({ autoStatusWriteback, syncTitleDescription: checked });
+              controller.current.update("syncTitleDescription", checked);
             },
           }),
         ),
@@ -644,6 +705,8 @@ function makeSettingsComponent(host) {
     const [newTrackerId, setNewTrackerId] = React.useState("");
     const [newStatusId, setNewStatusId] = React.useState("");
     const [newMaxInflight, setNewMaxInflight] = React.useState("");
+    const [creating, setCreating] = React.useState(false);
+    const [busyWatchIDs, setBusyWatchIDs] = React.useState(new Set());
 
     const load = React.useCallback(async () => {
       if (!connected) {
@@ -675,40 +738,74 @@ function makeSettingsComponent(host) {
     if (loading) return h(Spinner, { id: "redmine-watchers-loading" });
 
     const onCreate = async () => {
-      const projectId = parseInt(newProjectId, 10);
+      if (creating) return;
+      const projectId = Number(newProjectId);
       if (!Number.isSafeInteger(projectId) || projectId <= 0) {
         toast.error("Select a project.");
         return;
       }
-      const maxInflight = parseInt(newMaxInflight, 10);
+      const trackerId = newTrackerId === "" ? null : Number(newTrackerId);
+      if (trackerId !== null && (!Number.isSafeInteger(trackerId) || trackerId <= 0)) {
+        toast.error("Select a valid tracker.");
+        return;
+      }
+      const statusId = newStatusId === "" ? null : Number(newStatusId);
+      if (statusId !== null && (!Number.isSafeInteger(statusId) || statusId <= 0)) {
+        toast.error("Select a valid status.");
+        return;
+      }
+      const maxInflight = Number(newMaxInflight);
       if (newMaxInflight !== "" && (!Number.isSafeInteger(maxInflight) || maxInflight < 0)) {
         toast.error("Max inflight tasks must be a non-negative integer.");
         return;
       }
-      await invoke("watches.create", workspaceId, {
-        project_id: projectId,
-        tracker_id: newTrackerId ? parseInt(newTrackerId, 10) : null,
-        status_id: newStatusId ? parseInt(newStatusId, 10) : null,
-        max_inflight_tasks: Number.isFinite(maxInflight) ? maxInflight : 0,
-        enabled: true,
-      });
-      setNewProjectId("");
-      setNewTrackerId("");
-      setNewStatusId("");
-      setNewMaxInflight("");
-      toast.success("Watch created.");
-      await load();
+      setCreating(true);
+      try {
+        await invoke("watches.create", workspaceId, {
+          project_id: projectId,
+          tracker_id: trackerId,
+          status_id: statusId,
+          max_inflight_tasks: newMaxInflight === "" ? 0 : maxInflight,
+          enabled: true,
+        });
+        setNewProjectId("");
+        setNewTrackerId("");
+        setNewStatusId("");
+        setNewMaxInflight("");
+        toast.success("Watch created.");
+        await load();
+      } catch (err) {
+        toast.error(errorMessage(err));
+      } finally {
+        setCreating(false);
+      }
     };
 
     const onToggle = async (watch) => {
-      await invoke("watches.update", workspaceId, { ...watch, enabled: !watch.enabled });
-      await load();
+      if (busyWatchIDs.has(watch.id)) return;
+      setBusyWatchIDs((ids) => new Set(ids).add(watch.id));
+      try {
+        await invoke("watches.update", workspaceId, { ...watch, enabled: !watch.enabled });
+        await load();
+      } catch (err) {
+        toast.error(errorMessage(err));
+      } finally {
+        setBusyWatchIDs((ids) => { const next = new Set(ids); next.delete(watch.id); return next; });
+      }
     };
 
     const onDelete = async (watch) => {
-      await invoke("watches.delete", workspaceId, { id: watch.id });
-      toast.success("Watch removed.");
-      await load();
+      if (busyWatchIDs.has(watch.id)) return;
+      setBusyWatchIDs((ids) => new Set(ids).add(watch.id));
+      try {
+        await invoke("watches.delete", workspaceId, { id: watch.id });
+        toast.success("Watch removed.");
+        await load();
+      } catch (err) {
+        toast.error(errorMessage(err));
+      } finally {
+        setBusyWatchIDs((ids) => { const next = new Set(ids); next.delete(watch.id); return next; });
+      }
     };
 
     return h(
@@ -742,8 +839,8 @@ function makeSettingsComponent(host) {
                     { key: watch.id },
                     h(TableCell, null, (projects.find((project) => project.id === watch.project_id) || {}).name || watch.project_id),
                     h(TableCell, null, watch.max_inflight_tasks || "unlimited"),
-                    h(TableCell, null, h(Switch, { checked: watch.enabled, onCheckedChange: () => onToggle(watch) })),
-                    h(TableCell, null, h(Button, { variant: "outline", size: "sm", onClick: () => onDelete(watch) }, "Delete")),
+                    h(TableCell, null, h(Switch, { checked: watch.enabled, disabled: busyWatchIDs.has(watch.id), onCheckedChange: () => onToggle(watch) })),
+                    h(TableCell, null, h(Button, { variant: "outline", size: "sm", disabled: busyWatchIDs.has(watch.id), onClick: () => onDelete(watch) }, "Delete")),
                   ),
                 ),
               ),
@@ -786,7 +883,7 @@ function makeSettingsComponent(host) {
               onChange: (e) => setNewMaxInflight(e.target.value),
             }),
           ),
-          h(Button, { id: "redmine-watchers-create", "data-testid": "redmine-watch-create", onClick: onCreate }, "Add watch"),
+          h(Button, { id: "redmine-watchers-create", "data-testid": "redmine-watch-create", disabled: creating, onClick: onCreate }, creating ? "Creating…" : "Add watch"),
         ),
       ),
     );

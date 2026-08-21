@@ -30,10 +30,8 @@ import (
 	"github.com/kandev/kandev/pkg/pluginsdk"
 )
 
-// syncPollInterval is the inbound-sync / write-back-reconciliation cadence.
-// Outbound write-back also has a near-real-time path via OnEvent
-// ("task.moved"); this poll is the backstop for missed events and the only
-// path for inbound changes (see internal/sync's package doc comment).
+// syncPollInterval is the inbound-sync cadence. Outbound status changes are
+// sent only by the task.moved event path or the manual status action.
 const syncPollInterval = 60 * time.Second
 
 type redminePlugin struct {
@@ -188,14 +186,10 @@ func applyWatchMapping(w watch.Watch, mapping fieldmapping.Mapping) watch.Watch 
 
 // OnEvent handles task.moved for near-real-time outbound write-back (see
 // manifest.yaml's capabilities.events doc comment for why this plugin
-// declares an events capability at all). Every other event type is ignored;
-// events delivery is best-effort, so a missed task.moved still converges on
-// the next sync poll (pollWorkspace calls PollInbound only — write-back
-// reconciliation for a missed event happens on the *next task.moved* or via
-// the manual "Set Redmine status" action, since inferring "this step is
-// mapped and doesn't match Redmine" from polling alone would require
-// fetching every linked task's current step on every tick; OnEvent is the
-// intended primary path and is expected to be reliable in the common case).
+// declares an events capability at all). Every other event type is ignored.
+// Polling is inbound only: a missed task.moved is not reconstructed by a
+// later poll and can instead be corrected with another move or the manual
+// "Set Redmine status" action.
 func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
 	if e == nil {
 		return nil

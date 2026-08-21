@@ -56,10 +56,8 @@ runtime:
 #              status immediately rather than waiting for the next sync poll.
 #              This corrects task 01's original "no events capability"
 #              design decision — the spec's write-back scenario ("within one
-#              event-loop turn") is only achievable with it; the sync poll
-#              still runs as a reconciliation backstop since OnEvent delivery
-#              is best-effort (bounded in-memory queue, can be lost on
-#              backend restart per the plugin host's own delivery contract).
+#              event-loop turn") is only achievable with it. The sync poll is
+#              inbound only; it does not recreate a missed outbound event.
 capabilities:
   state: true
   secrets: true
