@@ -18,6 +18,7 @@ type fakeHost struct {
 	state     map[string]map[string]any
 	updates   []pluginsdk.UpdateTaskInput
 	updateErr error
+	task      pluginsdk.Task
 }
 
 func newFakeHost() *fakeHost {
@@ -93,7 +94,23 @@ func (r fakeTaskReader) Update(_ context.Context, in pluginsdk.UpdateTaskInput) 
 	if err != nil {
 		return nil, err
 	}
+	r.host.mu.Lock()
+	if in.Title != nil {
+		r.host.task.Title = *in.Title
+	}
+	if in.Description != nil {
+		r.host.task.Description = *in.Description
+	}
+	r.host.mu.Unlock()
 	return &pluginsdk.Task{ID: in.ID}, nil
+}
+
+func (r fakeTaskReader) Get(_ context.Context, id string) (*pluginsdk.Task, error) {
+	r.host.mu.Lock()
+	defer r.host.mu.Unlock()
+	task := r.host.task
+	task.ID = id
+	return &task, nil
 }
 
 var _ pluginsdk.Host = (*fakeHost)(nil)

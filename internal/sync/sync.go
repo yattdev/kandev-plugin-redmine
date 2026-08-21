@@ -162,6 +162,13 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 	if err != nil || !found {
 		return err
 	}
+	task, err := s.host.Tasks().Get(ctx, taskID)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return s.tasklink.Unset(ctx, taskID)
+		}
+		return fmt.Errorf("sync: reading linked task %s: %w", taskID, err)
+	}
 
 	update := pluginsdk.UpdateTaskInput{ID: taskID}
 	changed := false
@@ -178,7 +185,7 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 	if opts.SyncTitleDescription {
 		titleEcho = link.LastPushedTitle != "" && link.LastPushedTitle == issue.Subject
 		descriptionEcho = link.LastPushedDescriptionHash != "" && link.LastPushedDescriptionHash == tasklink.HashDescription(issue.Description)
-		if applyTitleAndDescription(&update, issue, *link, titleEcho, descriptionEcho) {
+		if applyTitleAndDescription(&update, issue, *task, *link, titleEcho, descriptionEcho) {
 			changed = true
 		}
 	}
@@ -204,14 +211,14 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 	return nil
 }
 
-func applyTitleAndDescription(update *pluginsdk.UpdateTaskInput, issue issues.Issue, link tasklink.Link, titleEcho, descriptionEcho bool) bool {
+func applyTitleAndDescription(update *pluginsdk.UpdateTaskInput, issue issues.Issue, task pluginsdk.Task, link tasklink.Link, titleEcho, descriptionEcho bool) bool {
 	changed := false
-	if !titleEcho && issue.Subject != "" {
+	if !titleEcho && issue.Subject != "" && issue.Subject != task.Title {
 		subject := issue.Subject
 		update.Title = &subject
 		changed = true
 	}
-	if !descriptionEcho {
+	if !descriptionEcho && issue.Description != task.Description {
 		description := issue.Description
 		update.Description = &description
 		changed = true
