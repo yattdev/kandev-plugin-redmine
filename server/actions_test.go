@@ -259,6 +259,23 @@ func TestHandleAction_WorkflowsList_ReturnsWorkflowsWithSteps(t *testing.T) {
 	require.Len(t, steps, 2)
 }
 
+func TestHandleAction_WatchesRejectForgedInvalidOrUnselectedInputs(t *testing.T) {
+	p, _ := newTestPlugin()
+	for _, body := range []map[string]any{
+		{"project_id": 0, "max_inflight_tasks": 0},
+		{"project_id": 1, "max_inflight_tasks": -1},
+		{"project_id": 1, "max_inflight_tasks": 0, "tracker_id": -1},
+		{"project_id": 1, "max_inflight_tasks": 0, "status_id": -1},
+		{"project_id": 99, "max_inflight_tasks": 0},
+	} {
+		out := handle(t, p, "watches.create", "ws-1", "", body)
+		require.NotEmpty(t, out["error"])
+	}
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
+	out := handle(t, p, "watches.create", "ws-1", "", map[string]any{"project_id": 2, "max_inflight_tasks": 0})
+	require.Contains(t, out["error"], "not selected")
+}
+
 func TestApplyWatchMapping_BackfillsLegacyWatchPlacementAndAttributes(t *testing.T) {
 	statusID := 5
 	legacy := watch.Watch{ID: "legacy", WorkspaceID: "ws-1", ProjectID: 1, StatusID: &statusID}

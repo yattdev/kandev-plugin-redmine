@@ -60,9 +60,13 @@ func (p *redminePlugin) handleWatchesCreate(ctx context.Context, req *pluginsdk.
 	if err != nil {
 		return nil, err
 	}
-	w, err := p.watchWithPlacement(ctx, req.Context.WorkspaceID, body.toWatch(req.Context.WorkspaceID))
+	w := body.toWatch(req.Context.WorkspaceID)
+	if err := p.validateWatch(ctx, w); err != nil {
+		return classifiedErrorResponse(err)
+	}
+	w, err = p.watchWithPlacement(ctx, req.Context.WorkspaceID, w)
 	if err != nil {
-		return nil, err
+		return classifiedErrorResponse(err)
 	}
 	created, err := p.watchSvc.CreateWatch(ctx, w)
 	if err != nil {
@@ -76,14 +80,43 @@ func (p *redminePlugin) handleWatchesUpdate(ctx context.Context, req *pluginsdk.
 	if err != nil {
 		return nil, err
 	}
-	w, err := p.watchWithPlacement(ctx, req.Context.WorkspaceID, body.toWatch(req.Context.WorkspaceID))
+	w := body.toWatch(req.Context.WorkspaceID)
+	if err := p.validateWatch(ctx, w); err != nil {
+		return classifiedErrorResponse(err)
+	}
+	w, err = p.watchWithPlacement(ctx, req.Context.WorkspaceID, w)
 	if err != nil {
-		return nil, err
+		return classifiedErrorResponse(err)
 	}
 	if err := p.watchSvc.UpdateWatch(ctx, w); err != nil {
 		return nil, err
 	}
 	return jsonResponse(toWatchResponse(w))
+}
+
+func (p *redminePlugin) validateWatch(ctx context.Context, w watch.Watch) error {
+	if w.ProjectID <= 0 {
+		return fmt.Errorf("redmine: project_id must be positive")
+	}
+	if w.MaxInflightTasks < 0 {
+		return fmt.Errorf("redmine: max_inflight_tasks must be non-negative")
+	}
+	if w.TrackerID != nil && *w.TrackerID <= 0 {
+		return fmt.Errorf("redmine: tracker_id must be positive")
+	}
+	if w.StatusID != nil && *w.StatusID <= 0 {
+		return fmt.Errorf("redmine: status_id must be positive")
+	}
+	selected, err := p.projectsSvc.GetSelection(ctx, w.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	for _, projectID := range selected {
+		if projectID == w.ProjectID {
+			return nil
+		}
+	}
+	return fmt.Errorf("redmine: project_id %d is not selected for this workspace", w.ProjectID)
 }
 
 func (p *redminePlugin) watchWithPlacement(ctx context.Context, workspaceID string, w watch.Watch) (watch.Watch, error) {
