@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -30,9 +31,19 @@ import (
 	"github.com/kandev/kandev/pkg/pluginsdk"
 )
 
-// syncPollInterval is the inbound-sync cadence. Outbound status changes are
-// sent only by the task.moved event path or the manual status action.
-const syncPollInterval = 60 * time.Second
+// defaultSyncPollInterval is the production inbound-sync cadence. Outbound
+// status changes are sent only by the task.moved event path or the manual
+// status action. The environment override exists for deterministic packaged
+// integration tests; invalid or sub-second values retain the safe default.
+const defaultSyncPollInterval = 60 * time.Second
+
+func configuredSyncPollInterval() time.Duration {
+	interval, err := time.ParseDuration(os.Getenv("KANDEV_REDMINE_POLL_INTERVAL"))
+	if err != nil || interval < time.Second {
+		return defaultSyncPollInterval
+	}
+	return interval
+}
 
 type redminePlugin struct {
 	pluginsdk.UnimplementedPlugin
@@ -119,7 +130,7 @@ func (p *redminePlugin) stop() {
 
 func (p *redminePlugin) runSyncLoop(ctx context.Context) {
 	defer p.wg.Done()
-	ticker := time.NewTicker(syncPollInterval)
+	ticker := time.NewTicker(configuredSyncPollInterval())
 	defer ticker.Stop()
 	for {
 		select {

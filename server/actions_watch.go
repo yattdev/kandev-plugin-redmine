@@ -4,10 +4,22 @@ import (
 	"context"
 	"fmt"
 
+	"kandev-plugin-redmine/internal/issues"
 	"kandev-plugin-redmine/internal/watch"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
 )
+
+func (p *redminePlugin) handleWatchesPoll(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	client, err := p.connectionSvc.Client(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return classifiedErrorResponse(err)
+	}
+	if err := p.pollWatches(ctx, req.Context.WorkspaceID, issues.New(client)); err != nil {
+		return classifiedErrorResponse(err)
+	}
+	return jsonResponse(map[string]any{"polled": true})
+}
 
 type watchResponse struct {
 	ID               string `json:"id"`

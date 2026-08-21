@@ -135,7 +135,8 @@ func (r fakeTaskReader) Create(_ context.Context, in pluginsdk.CreateTaskInput) 
 	r.host.creates = append(r.host.creates, in)
 	task := &pluginsdk.Task{
 		ID: fmt.Sprintf("task-%d", r.host.nextID), WorkspaceID: in.WorkspaceID,
-		Title: in.Title, Description: in.Description, State: "RUNNING", Priority: in.Priority, Labels: in.Labels, Metadata: in.Metadata,
+		Title: in.Title, Description: in.Description, State: "RUNNING", Priority: in.Priority, Labels: in.Labels,
+		Metadata: map[string]any{pluginMetadataKey: in.Metadata, "source": pluginMetadataKey},
 	}
 	r.host.tasks[task.ID] = task
 	return task, nil

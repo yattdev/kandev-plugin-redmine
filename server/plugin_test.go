@@ -40,6 +40,17 @@ func newFakeHost() *fakeHost {
 	return &fakeHost{state: make(map[string]map[string]any), secrets: make(map[string]string), tasks: make(map[string]*pluginsdk.Task)}
 }
 
+func TestConfiguredSyncPollInterval(t *testing.T) {
+	t.Setenv("KANDEV_REDMINE_POLL_INTERVAL", "2s")
+	require.Equal(t, 2*time.Second, configuredSyncPollInterval())
+
+	t.Setenv("KANDEV_REDMINE_POLL_INTERVAL", "500ms")
+	require.Equal(t, defaultSyncPollInterval, configuredSyncPollInterval())
+
+	t.Setenv("KANDEV_REDMINE_POLL_INTERVAL", "not-a-duration")
+	require.Equal(t, defaultSyncPollInterval, configuredSyncPollInterval())
+}
+
 func stateKeyOf(scope, scopeID, key string) string { return scope + "/" + scopeID + "/" + key }
 
 func (h *fakeHost) GetState(_ context.Context, scope, scopeID, key string) (map[string]any, bool, error) {

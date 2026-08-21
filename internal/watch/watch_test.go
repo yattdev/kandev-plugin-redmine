@@ -179,7 +179,7 @@ func TestCreateWatch_ThenPoll_CreatesOneTaskForMatchingIssue(t *testing.T) {
 
 	require.Len(t, host.tasks, 1)
 	for _, task := range host.tasks {
-		require.Equal(t, watchObj.ID, task.Metadata[metadataKeyWatchID])
+		require.Equal(t, watchObj.ID, taskPluginMetadata(task)[metadataKeyWatchID])
 	}
 }
 
@@ -377,6 +377,20 @@ func TestPoll_DisabledWatch_IsNoOp(t *testing.T) {
 
 	require.NoError(t, svc.Poll(context.Background(), watchObj, newIssuesService(t, oneIssuePage(42, "x"))))
 	require.Empty(t, host.tasks)
+}
+
+func TestPoll_TruncatesLongUnicodeSubjectToHostTitleLimit(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	watchObj, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+
+	require.NoError(t, svc.Poll(context.Background(), watchObj, newIssuesService(t, oneIssuePage(42, "éééééééééééééééééééééééééééééééééééééééééééééééééééééééé"))))
+	require.Len(t, host.tasks, 1)
+	for _, task := range host.tasks {
+		require.Len(t, []rune(task.Title), maxTaskTitleRunes)
+		require.Equal(t, '…', []rune(task.Title)[maxTaskTitleRunes-1])
+	}
 }
 
 func TestPoll_PropagatesWatchListReadFailure(t *testing.T) {

@@ -92,6 +92,7 @@ actions:
   - { key: "watches.create", scope: "workspace", max_body_bytes: 32768 }
   - { key: "watches.update", scope: "workspace", max_body_bytes: 32768 }
   - { key: "watches.delete", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "watches.poll", scope: "workspace", max_body_bytes: 8192 }
 
 # reference_sources: composer `#` mentions resolve Redmine issues through
 # SearchEntityReferences/AuthorizeEntityReference (backend, task 06/08) with

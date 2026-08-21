@@ -80,6 +80,8 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleWatchesUpdate(ctx, req)
 	case "watches.delete":
 		return p.handleWatchesDelete(ctx, req)
+	case "watches.poll":
+		return p.handleWatchesPoll(ctx, req)
 	default:
 		return nil, fmt.Errorf("redmine: unknown action %q", req.ActionKey)
 	}

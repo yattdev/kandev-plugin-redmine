@@ -527,6 +527,31 @@ func TestHandleAction_WatchesValidateLiveFiltersAndSelectedProject(t *testing.T)
 	}
 }
 
+func TestHandleAction_WatchesPollCreatesTaskImmediately(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/current.json":
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case "/projects.json":
+			_, _ = w.Write([]byte(`{"projects":[{"id":1,"name":"One"}],"total_count":1}`))
+		case "/issues.json":
+			_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"Watched issue"}],"total_count":1}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	p, host := newTestPlugin(t)
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
+	require.NoError(t, p.fieldmappingSvc.Save(context.Background(), "ws-1", fieldmapping.Mapping{WorkflowID: "wf-1"}))
+	created := handle(t, p, "watches.create", "ws-1", "", map[string]any{"project_id": 1, "max_inflight_tasks": 1, "enabled": true})
+	require.NotEmpty(t, created["id"])
+
+	require.Equal(t, true, handle(t, p, "watches.poll", "ws-1", "", nil)["polled"])
+	require.Len(t, host.tasks, 1)
+}
+
 func TestHandleAction_FieldMappingSaveValidatesAndNormalizesLiveValues(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

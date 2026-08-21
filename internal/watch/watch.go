@@ -32,6 +32,8 @@ import (
 // by construction rather than by convention.
 const metadataKeyWatchID = "redmine_watch_id"
 const metadataKeyIssueID = "redmine_issue_id"
+const pluginMetadataKey = "plugin:kandev-plugin-redmine"
+const maxTaskTitleRunes = 60
 
 // terminalTaskStates mirrors pkg/api/v1.IsTerminalTaskState's value set
 // (COMPLETED/FAILED/CANCELLED) — a watcher task in any other state still
@@ -291,7 +293,7 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 			step := w.WorkflowStepID
 			return &step
 		}(),
-		Title:       fmt.Sprintf("Redmine #%d: %s", issue.ID, issue.Subject),
+		Title:       watcherTaskTitle(issue.ID, issue.Subject),
 		Description: issue.Description,
 		Priority:    w.PriorityMappings[issue.PriorityID],
 		Labels:      labels,
@@ -313,6 +315,14 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: recording task %s: %w", task.ID, err))
 	}
 	return nil
+}
+
+func watcherTaskTitle(issueID int, subject string) string {
+	title := []rune(fmt.Sprintf("Redmine #%d: %s", issueID, subject))
+	if len(title) <= maxTaskTitleRunes {
+		return string(title)
+	}
+	return string(title[:maxTaskTitleRunes-1]) + "…"
 }
 
 func (s *Service) compensateCreatedTask(ctx context.Context, taskID string, cause error) error {
@@ -349,7 +359,7 @@ func (s *Service) deleteOwnedTaskAndLink(ctx context.Context, workspaceID, watch
 	if err != nil && status.Code(err) != codes.NotFound {
 		return fmt.Errorf("watch: reading task %s before cascade: %w", taskID, err)
 	}
-	if err == nil && (task.WorkspaceID != workspaceID || task.Metadata[metadataKeyWatchID] != watchID) {
+	if err == nil && (task.WorkspaceID != workspaceID || taskPluginMetadata(task)[metadataKeyWatchID] != watchID) {
 		return fmt.Errorf("watch: refusing to cascade task %s outside workspace/watch ownership", taskID)
 	}
 	if _, err := manager.Delete(ctx, taskID); err != nil {
@@ -383,7 +393,7 @@ func (s *Service) inflightCount(ctx context.Context, w Watch) (int, error) {
 			}
 			return 0, fmt.Errorf("watch: reading task %s for throttle: %w", taskID, err)
 		}
-		if task.Metadata[metadataKeyWatchID] != w.ID {
+		if taskPluginMetadata(task)[metadataKeyWatchID] != w.ID {
 			continue
 		}
 		if !terminalTaskStates[task.State] {
@@ -391,6 +401,19 @@ func (s *Service) inflightCount(ctx context.Context, w Watch) (int, error) {
 		}
 	}
 	return count, nil
+}
+
+func taskPluginMetadata(task *pluginsdk.Task) map[string]any {
+	if task == nil {
+		return nil
+	}
+	if nested, ok := task.Metadata[pluginMetadataKey].(map[string]any); ok {
+		return nested
+	}
+	// Older test hosts and SDK candidates returned plugin-owned metadata
+	// already unwrapped. Retain the fallback so upgrading the host does not
+	// invalidate existing watcher ownership records.
+	return task.Metadata
 }
 
 func (s *Service) hasSeen(ctx context.Context, workspaceID, watchID string, issueID int) (bool, error) {
