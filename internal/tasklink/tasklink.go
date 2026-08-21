@@ -1,6 +1,8 @@
 // Package tasklink persists the link between a Kandev task and a Redmine
 // issue, plus the echo-suppression bookkeeping internal/sync needs to keep a
-// write-back round trip from bouncing the task. The host's Tasks().Update
+// write-back round trip from bouncing the task, and the plugin-owned
+// applied tracker-label marker internal/sync uses to reconcile mapped
+// tracker labels without clobbering user labels. The host's Tasks().Update
 // has no metadata field to write a link onto an existing task (see
 // docs/plans/redmine-plugin/task-06-task-linking-bidirectional-sync.md
 // "Plan deviations"), so the link itself is plugin-owned state — the same
@@ -10,8 +12,6 @@ package tasklink
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -26,12 +26,17 @@ type Link struct {
 	IssueURL    string
 	WorkspaceID string
 
-	// Echo suppression: the most recent values this plugin itself pushed
+	// Echo suppression: the most recent status this plugin itself pushed
 	// outbound, compared against inbound observations before applying them
-	// (spec "Bidirectional sync").
-	LastPushedStatusID        *int
-	LastPushedTitle           string
-	LastPushedDescriptionHash string
+	// (spec "Bidirectional sync"). Title/description are inbound-only — no
+	// outbound echo is recorded for them.
+	LastPushedStatusID *int
+
+	// AppliedTrackerLabel is the tracker label this plugin last applied to
+	// the task on behalf of the current field mapping. The sync loop removes
+	// exactly this label (never user labels) when the mapping changes or the
+	// tracker mapping is cleared, preserving every other label the user set.
+	AppliedTrackerLabel string
 }
 
 const (
@@ -253,12 +258,11 @@ func (s *Service) RecordPushedStatus(ctx context.Context, taskID string, statusI
 	return s.save(ctx, taskID, *link)
 }
 
-// RecordPushedTitleAndDescription records the title/description this plugin
-// itself just pushed outbound, for echo suppression on the next inbound
-// poll. The description is stored only as a hash (it is otherwise duplicated
-// in the task row itself; no need to keep a second full copy in plugin
-// state).
-func (s *Service) RecordPushedTitleAndDescription(ctx context.Context, taskID, title, description string) error {
+// RecordAppliedTrackerLabel records the tracker label this plugin last
+// applied to the task as part of inbound tracker reconciliation. An empty
+// label clears the marker so a later poll does not try to remove a label we
+// never wrote (or already removed).
+func (s *Service) RecordAppliedTrackerLabel(ctx context.Context, taskID, label string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	link, found, err := s.getLocked(ctx, taskID)
@@ -268,39 +272,22 @@ func (s *Service) RecordPushedTitleAndDescription(ctx context.Context, taskID, t
 	if !found {
 		return fmt.Errorf("tasklink: task %s is not linked", taskID)
 	}
-	link.LastPushedTitle = title
-	link.LastPushedDescriptionHash = HashDescription(description)
+	link.AppliedTrackerLabel = label
 	return s.save(ctx, taskID, *link)
 }
 
-// ConsumeEcho clears markers after the matching inbound observation. Markers
-// are intentionally one-shot: a later independent Redmine update back to the
-// same value must not be suppressed forever.
-func (s *Service) ConsumeEcho(ctx context.Context, taskID string, status, title, description bool) error {
+// ConsumeStatusEcho clears the outbound status marker after the next inbound
+// observation. The marker is intentionally one-shot: a later independent
+// Redmine update back to the same value must not be suppressed forever.
+func (s *Service) ConsumeStatusEcho(ctx context.Context, taskID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	link, found, err := s.getLocked(ctx, taskID)
 	if err != nil || !found {
 		return err
 	}
-	if status {
-		link.LastPushedStatusID = nil
-	}
-	if title {
-		link.LastPushedTitle = ""
-	}
-	if description {
-		link.LastPushedDescriptionHash = ""
-	}
+	link.LastPushedStatusID = nil
 	return s.save(ctx, taskID, *link)
-}
-
-// HashDescription is the description-comparison hash used for echo
-// suppression, exported so internal/sync can compute the same hash for an
-// inbound description before comparing it against LastPushedDescriptionHash.
-func HashDescription(description string) string {
-	sum := sha256.Sum256([]byte(description))
-	return hex.EncodeToString(sum[:])
 }
 
 func (s *Service) save(ctx context.Context, taskID string, link Link) error {
@@ -379,11 +366,8 @@ func (l Link) toMap() map[string]any {
 	if l.LastPushedStatusID != nil {
 		m["last_pushed_status_id"] = *l.LastPushedStatusID
 	}
-	if l.LastPushedTitle != "" {
-		m["last_pushed_title"] = l.LastPushedTitle
-	}
-	if l.LastPushedDescriptionHash != "" {
-		m["last_pushed_description_hash"] = l.LastPushedDescriptionHash
+	if l.AppliedTrackerLabel != "" {
+		m["applied_tracker_label"] = l.AppliedTrackerLabel
 	}
 	return m
 }
@@ -403,11 +387,11 @@ func linkFromMap(m map[string]any) Link {
 		statusID := int(v)
 		link.LastPushedStatusID = &statusID
 	}
-	if v, ok := m["last_pushed_title"].(string); ok {
-		link.LastPushedTitle = v
+	if v, ok := m["applied_tracker_label"].(string); ok {
+		link.AppliedTrackerLabel = v
 	}
-	if v, ok := m["last_pushed_description_hash"].(string); ok {
-		link.LastPushedDescriptionHash = v
-	}
+	// Legacy last_pushed_title / last_pushed_description_hash entries are
+	// intentionally ignored: outbound echo state for title/description was
+	// removed; old on-disk values are simply dropped on next save.
 	return link
 }

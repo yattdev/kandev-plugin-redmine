@@ -277,8 +277,9 @@ func (s *Service) watchExistsLocked(ctx context.Context, workspaceID, watchID st
 
 func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) error {
 	labels := []string(nil)
-	if label := w.TrackerLabels[issue.TrackerID]; label != "" {
-		labels = []string{label}
+	appliedTrackerLabel := w.TrackerLabels[issue.TrackerID]
+	if appliedTrackerLabel != "" {
+		labels = []string{appliedTrackerLabel}
 	}
 	task, err := s.host.Tasks().Create(ctx, pluginsdk.CreateTaskInput{
 		WorkspaceID: w.WorkspaceID,
@@ -304,6 +305,9 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 	}
 	if err := s.tasklinks.Set(ctx, task.ID, w.WorkspaceID, issue.ID, issue.URL); err != nil {
 		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: linking task %s: %w", task.ID, err))
+	}
+	if err := s.tasklinks.RecordAppliedTrackerLabel(ctx, task.ID, appliedTrackerLabel); err != nil {
+		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: recording tracker label for task %s: %w", task.ID, err))
 	}
 	if err := s.recordWatchTask(ctx, w.WorkspaceID, w.ID, issue.ID, task.ID); err != nil {
 		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: recording task %s: %w", task.ID, err))

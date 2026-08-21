@@ -19,10 +19,17 @@ import (
 )
 
 func testMapping() fieldmapping.Mapping {
-	return fieldmapping.Mapping{Statuses: []fieldmapping.StatusMapping{
-		{RedmineStatusID: 1, RedmineName: "Triage", IsClosed: false, WorkflowStepID: "step-backlog"},
-		{RedmineStatusID: 2, RedmineName: "Shipped", IsClosed: true, WorkflowStepID: "step-done"},
-	}}
+	return fieldmapping.Mapping{
+		Statuses: []fieldmapping.StatusMapping{
+			{RedmineStatusID: 1, RedmineName: "Triage", IsClosed: false, WorkflowStepID: "step-backlog"},
+			{RedmineStatusID: 2, RedmineName: "Shipped", IsClosed: true, WorkflowStepID: "step-done"},
+		},
+		Trackers: []fieldmapping.TrackerMapping{
+			{RedmineTrackerID: 3, TaskLabel: "bug"},
+			{RedmineTrackerID: 4, TaskLabel: "feature"},
+		},
+		Priorities: []fieldmapping.PriorityMapping{{RedminePriorityID: 5, TaskPriority: "high"}},
+	}
 }
 
 func TestPollInbound_LinkedIssueStatusChange_MovesTaskToMappedStep(t *testing.T) {
@@ -173,6 +180,84 @@ func TestPollInbound_ManualMoveAwayIsRestoredFromMappedRedmineStatus(t *testing.
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
 	require.Equal(t, "step-done", host.task.WorkflowStepID)
 	require.Len(t, host.updateCalls(), 1)
+}
+
+func TestPollInbound_AppliesPriorityAndTrackerLabelWithoutChangingUserLabels(t *testing.T) {
+	host := newFakeHost()
+	host.task.Labels = []string{"customer", "keep-order"}
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":99},"tracker":{"id":3},"priority":{"id":5},"updated_on":"2026-01-01T00:00:00Z"}],"total_count":1}`))
+	}))
+	defer srv.Close()
+	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
+
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
+	require.Len(t, host.updateCalls(), 1)
+	require.Equal(t, "high", host.task.Priority)
+	require.Equal(t, []string{"customer", "keep-order", "bug"}, host.task.Labels)
+	link, found, err := tl.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "bug", link.AppliedTrackerLabel)
+
+	// The overlap poll is fully idempotent once task fields and ownership
+	// marker agree with Redmine.
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
+	require.Len(t, host.updateCalls(), 1)
+}
+
+func TestPollInbound_TrackerTransitionReplacesOnlyPluginOwnedLabel(t *testing.T) {
+	host := newFakeHost()
+	host.task.Labels = []string{"customer", "bug", "keep-order"}
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	require.NoError(t, tl.RecordAppliedTrackerLabel(context.Background(), "task-1", "bug"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":99},"tracker":{"id":4}}],"total_count":1}`))
+	}))
+	defer srv.Close()
+
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
+	require.Equal(t, []string{"customer", "keep-order", "feature"}, host.task.Labels)
+}
+
+func TestPollInbound_EmptyTrackerMappingRemovesOnlyPreviousOwnedLabel(t *testing.T) {
+	host := newFakeHost()
+	host.task.Labels = []string{"customer", "bug", "keep-order"}
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	require.NoError(t, tl.RecordAppliedTrackerLabel(context.Background(), "task-1", "bug"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":99},"tracker":{"id":88}}],"total_count":1}`))
+	}))
+	defer srv.Close()
+
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
+	require.Equal(t, []string{"customer", "keep-order"}, host.task.Labels)
+}
+
+func TestPollInbound_PreexistingMatchingUserLabelRemainsUnowned(t *testing.T) {
+	host := newFakeHost()
+	host.task.Labels = []string{"customer", "bug"}
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":99},"tracker":{"id":3}}],"total_count":1}`))
+	}))
+	defer srv.Close()
+
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
+	require.Empty(t, host.updateCalls())
+	link, found, err := tl.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Empty(t, link.AppliedTrackerLabel)
 }
 
 func TestPollInbound_CursorAdvancesAndPersistsAcrossRestarts(t *testing.T) {

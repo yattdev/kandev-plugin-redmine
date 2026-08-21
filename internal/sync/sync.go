@@ -146,9 +146,8 @@ func (s *Service) pollProject(ctx context.Context, workspaceID string, issuesSvc
 	}
 }
 
-// applyInbound updates the task linked to issue (if any), skipping any field
-// whose incoming value matches what this plugin itself last pushed
-// (echo suppression).
+// applyInbound updates the task linked to issue, if any. Status echo markers
+// are one-shot; title and description are inbound-only.
 func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue issues.Issue, mapping fieldmapping.Mapping, opts Options) error {
 	taskID, found, err := s.tasklink.TaskIDForIssue(ctx, workspaceID, issue.ID)
 	if err != nil || !found {
@@ -166,63 +165,120 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 		return fmt.Errorf("sync: reading linked task %s: %w", taskID, err)
 	}
 
-	update := pluginsdk.UpdateTaskInput{ID: taskID}
-	changed := false
-	statusEcho, staleStatusMarker, titleEcho, descriptionEcho := false, false, false, false
-	if link.LastPushedStatusID != nil && *link.LastPushedStatusID != issue.StatusID {
-		staleStatusMarker = true
-	}
-
-	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok {
-		statusEcho = link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
-		if !statusEcho && task.WorkflowStepID != stepID {
-			update.WorkflowStepID = &stepID
-			changed = true
+	plan := buildInboundPlan(taskID, *task, *link, issue, mapping, opts)
+	if plan.changed {
+		if _, err := s.host.Tasks().Update(ctx, plan.update); err != nil {
+			if status.Code(err) == codes.NotFound {
+				return s.tasklink.Unset(ctx, taskID)
+			}
+			return fmt.Errorf("sync: applying inbound update to task %s: %w", taskID, err)
 		}
 	}
+	return s.finishInbound(ctx, taskID, plan)
+}
 
+type inboundPlan struct {
+	update               pluginsdk.UpdateTaskInput
+	changed              bool
+	consumeStatusEcho    bool
+	desiredTrackerLabel  string
+	trackerMarkerChanged bool
+}
+
+func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, issue issues.Issue, mapping fieldmapping.Mapping, opts Options) inboundPlan {
+	plan := inboundPlan{update: pluginsdk.UpdateTaskInput{ID: taskID}}
+	plan.consumeStatusEcho = link.LastPushedStatusID != nil
+	statusEcho := link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
+	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok && !statusEcho && task.WorkflowStepID != stepID {
+		plan.update.WorkflowStepID = &stepID
+		plan.changed = true
+	}
 	if opts.SyncTitleDescription {
-		titleEcho = link.LastPushedTitle != "" && link.LastPushedTitle == issue.Subject
-		descriptionEcho = link.LastPushedDescriptionHash != "" && link.LastPushedDescriptionHash == tasklink.HashDescription(issue.Description)
-		if applyTitleAndDescription(&update, issue, *task, *link, titleEcho, descriptionEcho) {
-			changed = true
-		}
+		plan.changed = applyTitleAndDescriptionInbound(&plan.update, issue, task) || plan.changed
 	}
-	if !changed {
-		if statusEcho || staleStatusMarker || titleEcho || descriptionEcho {
-			return s.tasklink.ConsumeEcho(ctx, taskID, statusEcho || staleStatusMarker, titleEcho, descriptionEcho)
-		}
-		return nil
+	if priority, ok := mapping.TaskPriorityForRedminePriority(issue.PriorityID); ok && task.Priority != priority {
+		plan.update.Priority = &priority
+		plan.changed = true
 	}
-	if _, err := s.host.Tasks().Update(ctx, update); err != nil {
-		if status.Code(err) == codes.NotFound {
-			// Event delivery is best-effort. A missed task.deleted must not
-			// pin this workspace's cursor on a stale task link forever.
-			return s.tasklink.Unset(ctx, taskID)
-		}
-		return fmt.Errorf("sync: applying inbound update to task %s: %w", taskID, err)
+	plan.desiredTrackerLabel, _ = mapping.TaskLabelForTracker(issue.TrackerID)
+	labels := reconcileTrackerLabels(task.Labels, link.AppliedTrackerLabel, plan.desiredTrackerLabel)
+	if !stringSlicesEqual(labels, task.Labels) {
+		plan.update.Labels = &labels
+		plan.changed = true
 	}
-	if statusEcho || staleStatusMarker || titleEcho || descriptionEcho {
-		if err := s.tasklink.ConsumeEcho(ctx, taskID, statusEcho || staleStatusMarker, titleEcho, descriptionEcho); err != nil {
+	// Do not claim an identical pre-existing user label as plugin-owned when
+	// a manually linked task has no ownership marker. We persist ownership
+	// only when this reconciliation actually changes labels, or when replacing
+	// or clearing an existing marker.
+	plan.trackerMarkerChanged = plan.update.Labels != nil ||
+		(link.AppliedTrackerLabel != "" && link.AppliedTrackerLabel != plan.desiredTrackerLabel)
+	return plan
+}
+
+func (s *Service) finishInbound(ctx context.Context, taskID string, plan inboundPlan) error {
+	if plan.trackerMarkerChanged {
+		if err := s.tasklink.RecordAppliedTrackerLabel(ctx, taskID, plan.desiredTrackerLabel); err != nil {
 			return err
 		}
+	}
+	if plan.consumeStatusEcho {
+		return s.tasklink.ConsumeStatusEcho(ctx, taskID)
 	}
 	return nil
 }
 
-func applyTitleAndDescription(update *pluginsdk.UpdateTaskInput, issue issues.Issue, task pluginsdk.Task, link tasklink.Link, titleEcho, descriptionEcho bool) bool {
+func applyTitleAndDescriptionInbound(update *pluginsdk.UpdateTaskInput, issue issues.Issue, task pluginsdk.Task) bool {
 	changed := false
-	if !titleEcho && issue.Subject != "" && issue.Subject != task.Title {
-		subject := issue.Subject
-		update.Title = &subject
+	if issue.Subject != "" && issue.Subject != task.Title {
+		update.Title = &issue.Subject
 		changed = true
 	}
-	if !descriptionEcho && issue.Description != task.Description {
-		description := issue.Description
-		update.Description = &description
+	if issue.Description != task.Description {
+		update.Description = &issue.Description
 		changed = true
 	}
 	return changed
+}
+
+// reconcileTrackerLabels removes only the previously plugin-owned label and
+// adds the desired mapping if absent. Every unrelated label and its order are
+// preserved exactly.
+func reconcileTrackerLabels(current []string, appliedMarker, desiredLabel string) []string {
+	if appliedMarker == desiredLabel && (desiredLabel == "" || containsLabel(current, desiredLabel)) {
+		return append([]string(nil), current...)
+	}
+	out := make([]string, 0, len(current)+1)
+	for _, label := range current {
+		if appliedMarker != "" && label == appliedMarker {
+			continue
+		}
+		out = append(out, label)
+	}
+	if desiredLabel != "" && !containsLabel(out, desiredLabel) {
+		out = append(out, desiredLabel)
+	}
+	return out
+}
+
+func containsLabel(labels []string, want string) bool {
+	for _, label := range labels {
+		if label == want {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // PushWriteback issues an outbound status PUT when a linked task moves to a

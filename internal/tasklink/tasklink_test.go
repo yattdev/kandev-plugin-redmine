@@ -21,7 +21,7 @@ func TestSetAndGet_RoundTrips(t *testing.T) {
 	require.Equal(t, "ws-1", link.WorkspaceID)
 }
 
-func TestConcurrentEchoMarkerWritesPreserveStatusAndTitleDescription(t *testing.T) {
+func TestConcurrentMarkerWritesPreserveStatusAndTrackerLabel(t *testing.T) {
 	svc := New(newFakeHost())
 	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
 	var wg sync.WaitGroup
@@ -30,7 +30,7 @@ func TestConcurrentEchoMarkerWritesPreserveStatusAndTitleDescription(t *testing.
 	go func() { defer wg.Done(); errs <- svc.RecordPushedStatus(context.Background(), "task-1", 5) }()
 	go func() {
 		defer wg.Done()
-		errs <- svc.RecordPushedTitleAndDescription(context.Background(), "task-1", "Title", "Description")
+		errs <- svc.RecordAppliedTrackerLabel(context.Background(), "task-1", "mapped-tracker")
 	}()
 	wg.Wait()
 	close(errs)
@@ -42,8 +42,7 @@ func TestConcurrentEchoMarkerWritesPreserveStatusAndTitleDescription(t *testing.
 	require.True(t, found)
 	require.NotNil(t, link.LastPushedStatusID)
 	require.Equal(t, 5, *link.LastPushedStatusID)
-	require.Equal(t, "Title", link.LastPushedTitle)
-	require.Equal(t, HashDescription("Description"), link.LastPushedDescriptionHash)
+	require.Equal(t, "mapped-tracker", link.AppliedTrackerLabel)
 }
 
 func TestGet_NotLinked_ReturnsNotFound(t *testing.T) {
@@ -110,17 +109,34 @@ func TestSetEchoSuppression_RoundTrips(t *testing.T) {
 	require.Equal(t, 5, *link.LastPushedStatusID)
 }
 
-func TestRecordPushedTitleAndDescription_RoundTrips(t *testing.T) {
+func TestRecordAppliedTrackerLabel_RoundTripsAndClears(t *testing.T) {
 	svc := New(newFakeHost())
 	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
 
-	require.NoError(t, svc.RecordPushedTitleAndDescription(context.Background(), "task-1", "New title", "New description"))
+	require.NoError(t, svc.RecordAppliedTrackerLabel(context.Background(), "task-1", "mapped-tracker"))
 
 	link, found, err := svc.Get(context.Background(), "task-1")
 	require.NoError(t, err)
 	require.True(t, found)
-	require.Equal(t, "New title", link.LastPushedTitle)
-	require.NotEmpty(t, link.LastPushedDescriptionHash)
+	require.Equal(t, "mapped-tracker", link.AppliedTrackerLabel)
+
+	require.NoError(t, svc.RecordAppliedTrackerLabel(context.Background(), "task-1", ""))
+	link, found, err = svc.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Empty(t, link.AppliedTrackerLabel)
+}
+
+func TestConsumeStatusEcho_IsOneShot(t *testing.T) {
+	svc := New(newFakeHost())
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	require.NoError(t, svc.RecordPushedStatus(context.Background(), "task-1", 5))
+	require.NoError(t, svc.ConsumeStatusEcho(context.Background(), "task-1"))
+
+	link, found, err := svc.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Nil(t, link.LastPushedStatusID)
 }
 
 func TestSet_RelinkRemovesOldIndexAndRejectsDuplicateIssue(t *testing.T) {

@@ -91,15 +91,37 @@ func TestPoll_WatchIndexFailureCompensatesTaskAndLink(t *testing.T) {
 	svc := newWatchService(host)
 	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
 	require.NoError(t, err)
-	// Link persistence performs two writes (task link and reverse index); the
-	// third is the watcher dedup index and must trigger full compensation.
+	// Link persistence performs two writes, the tracker marker is the third,
+	// and the watcher dedup index is the fourth.
 	host.setStateCalls = 0
-	host.failSetStateAt = 3
+	host.failSetStateAt = 4
 	require.Error(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "x"))))
 	require.Empty(t, host.tasks)
 	tasks, err := svc.watchTasks(context.Background(), "ws-1", w.ID)
 	require.NoError(t, err)
 	require.Empty(t, tasks)
+	_, found, err := svc.tasklinks.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestPoll_TrackerMarkerFailureCompensatesTaskAndLink(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{
+		WorkspaceID: "ws-1", ProjectID: 1, Enabled: true,
+		TrackerLabels: map[int]string{3: "bug"},
+	})
+	require.NoError(t, err)
+	host.setStateCalls = 0
+	host.failSetStateAt = 3
+	issuesSvc := newIssuesService(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"x","tracker":{"id":3}}],"total_count":1}`))
+	})
+
+	require.ErrorContains(t, svc.Poll(context.Background(), w, issuesSvc), "recording tracker label")
+	require.Empty(t, host.tasks)
+	require.Len(t, host.deletedTaskIDs(), 1)
 	_, found, err := svc.tasklinks.TaskIDForIssue(context.Background(), "ws-1", 42)
 	require.NoError(t, err)
 	require.False(t, found)
@@ -191,6 +213,26 @@ func TestPoll_CreatedTaskIsLinkedAndReverseIndexed(t *testing.T) {
 	_, found, err = svc.tasklinks.TaskIDForIssue(context.Background(), "ws-1", 42)
 	require.NoError(t, err)
 	require.False(t, found)
+}
+
+func TestPoll_CreatedTaskLinkRecordsOwnedTrackerLabel(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{
+		WorkspaceID: "ws-1", ProjectID: 1, Enabled: true,
+		TrackerLabels: map[int]string{3: "bug"},
+	})
+	require.NoError(t, err)
+	issuesSvc := newIssuesService(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"linked","tracker":{"id":3}}],"total_count":1}`))
+	})
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+
+	taskID := svc.mustWatchTaskID(t, "ws-1", w.ID, 42)
+	link, found, err := svc.tasklinks.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "bug", link.AppliedTrackerLabel)
 }
 
 func TestDeleteWatchFailsClosedWithoutTaskTreeManager(t *testing.T) {

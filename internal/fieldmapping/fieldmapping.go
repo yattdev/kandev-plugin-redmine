@@ -76,6 +76,32 @@ func (m Mapping) StatusForWorkflowStep(workflowStepID string) (int, bool) {
 	return 0, false
 }
 
+// TaskLabelForTracker resolves the inbound direction: a Redmine tracker ID
+// to the Kandev task label it maps to. Empty and absent mappings both resolve
+// as no desired label, allowing sync to remove only its previously owned
+// tracker label.
+func (m Mapping) TaskLabelForTracker(redmineTrackerID int) (string, bool) {
+	for _, t := range m.Trackers {
+		if t.RedmineTrackerID == redmineTrackerID {
+			return t.TaskLabel, t.TaskLabel != ""
+		}
+	}
+	return "", false
+}
+
+// TaskPriorityForRedminePriority resolves the inbound direction: a Redmine
+// priority ID to the Kandev task priority it maps to
+// (critical|high|medium|low). An empty TaskPriority entry is reported as
+// unmapped.
+func (m Mapping) TaskPriorityForRedminePriority(redminePriorityID int) (string, bool) {
+	for _, p := range m.Priorities {
+		if p.RedminePriorityID == redminePriorityID {
+			return p.TaskPriority, p.TaskPriority != ""
+		}
+	}
+	return "", false
+}
+
 const (
 	stateScope = "workspace"
 	stateKey   = "field_mapping"
