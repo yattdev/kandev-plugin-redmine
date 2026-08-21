@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"kandev-plugin-redmine/internal/connection"
 	"kandev-plugin-redmine/internal/fieldmapping"
 	"kandev-plugin-redmine/internal/issues"
 	"kandev-plugin-redmine/internal/redmineclient"
@@ -146,7 +147,12 @@ func (p *redminePlugin) handleConnectionSave(ctx context.Context, req *pluginsdk
 	if err != nil {
 		return nil, err
 	}
-	record, err := p.connectionSvc.Connect(ctx, req.Context.WorkspaceID, body.BaseURL, body.APIKey)
+	var record *connection.Record
+	if body.APIKey == "" {
+		record, err = p.connectionSvc.ConnectWithExistingKey(ctx, req.Context.WorkspaceID, body.BaseURL)
+	} else {
+		record, err = p.connectionSvc.Connect(ctx, req.Context.WorkspaceID, body.BaseURL, body.APIKey)
+	}
 	if err != nil {
 		return classifiedErrorResponse(err)
 	}

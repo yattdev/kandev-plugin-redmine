@@ -193,7 +193,7 @@ function makeSettingsComponent(host) {
         { className: "gap-2" },
         h(
           Button,
-          { id: "redmine-connection-save", "data-testid": "redmine-connection-save", disabled: saving || !baseUrl || !apiKey, onClick: onSave },
+          { id: "redmine-connection-save", "data-testid": "redmine-connection-save", disabled: saving || !baseUrl || (!apiKey && connection.state !== "connected"), onClick: onSave },
           "Save",
         ),
         connection.state !== "disconnected"

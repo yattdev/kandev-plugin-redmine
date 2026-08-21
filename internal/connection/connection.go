@@ -108,6 +108,24 @@ func (s *Service) Connect(ctx context.Context, workspaceID, baseURL, apiKey stri
 	return record, nil
 }
 
+// ConnectWithExistingKey validates and saves a changed base URL while
+// retaining the existing workspace secret. It is used only for an already
+// connected workspace; a first connection still requires an explicit key.
+func (s *Service) ConnectWithExistingKey(ctx context.Context, workspaceID, baseURL string) (*Record, error) {
+	if baseURL == "" {
+		record, found, err := s.Get(ctx, workspaceID)
+		if err != nil || !found {
+			return nil, errors.New("connection: base url and api key are required")
+		}
+		baseURL = record.BaseURL
+	}
+	apiKey, err := s.decryptedAPIKey(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	return s.Connect(ctx, workspaceID, baseURL, apiKey)
+}
+
 // Get returns the current connection Record for workspaceID, if any.
 func (s *Service) Get(ctx context.Context, workspaceID string) (*Record, bool, error) {
 	value, found, err := s.host.GetState(ctx, stateScope, workspaceID, stateKey)
