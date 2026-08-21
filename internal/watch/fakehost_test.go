@@ -15,12 +15,13 @@ import (
 type fakeHost struct {
 	pluginsdk.UnimplementedHostData
 
-	mu      sync.Mutex
-	state   map[string]map[string]any
-	tasks   map[string]*pluginsdk.Task
-	nextID  int
-	deleted []string
-	creates []pluginsdk.CreateTaskInput
+	mu          sync.Mutex
+	state       map[string]map[string]any
+	tasks       map[string]*pluginsdk.Task
+	nextID      int
+	deleted     []string
+	creates     []pluginsdk.CreateTaskInput
+	getStateErr error
 }
 
 func newFakeHost() *fakeHost {
@@ -32,6 +33,9 @@ func key(scope, scopeID, k string) string { return scope + "/" + scopeID + "/" +
 func (h *fakeHost) GetState(_ context.Context, scope, scopeID, k string) (map[string]any, bool, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.getStateErr != nil {
+		return nil, false, h.getStateErr
+	}
 	v, ok := h.state[key(scope, scopeID, k)]
 	return v, ok, nil
 }

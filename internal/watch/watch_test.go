@@ -175,6 +175,16 @@ func TestPoll_DisabledWatch_IsNoOp(t *testing.T) {
 	require.Empty(t, host.tasks)
 }
 
+func TestPoll_PropagatesWatchListReadFailure(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	host.getStateErr = fmt.Errorf("state unavailable")
+	err = svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "x")))
+	require.ErrorContains(t, err, "reading watches")
+}
+
 func TestDeleteWatch_CascadesTaskTreeDeleteAndRemovesFromList(t *testing.T) {
 	host := newFakeHost()
 	svc := New(host)

@@ -68,7 +68,10 @@ const (
 
 type Service struct {
 	host pluginsdk.Host
-	mu   sync.Mutex
+	// One mutex deliberately serializes polls with create/update/delete/clear.
+	// This prevents duplicate issue tasks and watch resurrection; watch volume
+	// is small enough that correctness currently outweighs parallel polling.
+	mu sync.Mutex
 }
 
 func New(host pluginsdk.Host) *Service {
@@ -210,7 +213,11 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 	if !w.Enabled {
 		return nil
 	}
-	if !s.watchExistsLocked(ctx, w.WorkspaceID, w.ID) {
+	exists, err := s.watchExistsLocked(ctx, w.WorkspaceID, w.ID)
+	if err != nil {
+		return err
+	}
+	if !exists {
 		return nil
 	}
 
@@ -250,17 +257,17 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 	}
 }
 
-func (s *Service) watchExistsLocked(ctx context.Context, workspaceID, watchID string) bool {
+func (s *Service) watchExistsLocked(ctx context.Context, workspaceID, watchID string) (bool, error) {
 	watches, err := s.listWatchesLocked(ctx, workspaceID)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, candidate := range watches {
 		if candidate.ID == watchID {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) error {
