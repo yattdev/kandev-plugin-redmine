@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	"kandev-plugin-redmine/internal/connection"
 	"kandev-plugin-redmine/internal/fieldmapping"
@@ -220,7 +222,31 @@ func (p *redminePlugin) handleProjectsSave(ctx context.Context, req *pluginsdk.P
 	if err != nil {
 		return nil, err
 	}
-	if err := p.projectsSvc.SaveSelection(ctx, req.Context.WorkspaceID, body.ProjectIDs); err != nil {
+	client, err := p.connectionSvc.Client(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return classifiedErrorResponse(err)
+	}
+	live, err := p.projectsSvc.ListLive(ctx, client)
+	if err != nil {
+		return classifiedErrorResponse(err)
+	}
+	visible := make(map[int]bool, len(live))
+	for _, project := range live {
+		visible[project.ID] = true
+	}
+	selected := make([]int, 0, len(body.ProjectIDs))
+	seen := make(map[int]bool, len(body.ProjectIDs))
+	for _, id := range body.ProjectIDs {
+		if id <= 0 || !visible[id] {
+			return classifiedErrorResponse(fmt.Errorf("redmine: selected project %d is not visible", id))
+		}
+		if !seen[id] {
+			selected = append(selected, id)
+			seen[id] = true
+		}
+	}
+	sort.Ints(selected)
+	if err := p.projectsSvc.SaveSelection(ctx, req.Context.WorkspaceID, selected); err != nil {
 		return nil, err
 	}
 	return jsonResponse(map[string]bool{"saved": true})
@@ -328,10 +354,78 @@ func (p *redminePlugin) handleFieldMappingSave(ctx context.Context, req *plugins
 	if err := p.validateMappingWorkflow(ctx, req.Context.WorkspaceID, body); err != nil {
 		return classifiedErrorResponse(err)
 	}
+	client, err := p.connectionSvc.Client(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return classifiedErrorResponse(err)
+	}
+	if err := p.normalizeAndValidateMapping(ctx, client, &body); err != nil {
+		return classifiedErrorResponse(err)
+	}
 	if err := p.fieldmappingSvc.Save(ctx, req.Context.WorkspaceID, body); err != nil {
 		return nil, err
 	}
 	return jsonResponse(map[string]bool{"saved": true})
+}
+
+func (p *redminePlugin) normalizeAndValidateMapping(ctx context.Context, client *redmineclient.Client, mapping *fieldmapping.Mapping) error {
+	statuses, err := client.ListIssueStatuses(ctx)
+	if err != nil {
+		return err
+	}
+	trackers, err := client.ListTrackers(ctx)
+	if err != nil {
+		return err
+	}
+	priorities, err := client.ListIssuePriorities(ctx)
+	if err != nil {
+		return err
+	}
+	statusByID := make(map[int]redmineclient.IssueStatus, len(statuses))
+	for _, value := range statuses {
+		statusByID[value.ID] = value
+	}
+	trackerByID := make(map[int]redmineclient.Tracker, len(trackers))
+	for _, value := range trackers {
+		trackerByID[value.ID] = value
+	}
+	priorityByID := make(map[int]redmineclient.Priority, len(priorities))
+	for _, value := range priorities {
+		priorityByID[value.ID] = value
+	}
+	seenStatuses, seenTrackers, seenPriorities := map[int]bool{}, map[int]bool{}, map[int]bool{}
+	for i := range mapping.Statuses {
+		item := &mapping.Statuses[i]
+		live, ok := statusByID[item.RedmineStatusID]
+		if item.RedmineStatusID <= 0 || !ok || seenStatuses[item.RedmineStatusID] {
+			return fmt.Errorf("redmine: status mapping id %d is invalid or duplicated", item.RedmineStatusID)
+		}
+		seenStatuses[item.RedmineStatusID] = true
+		item.RedmineName = live.Name
+		item.IsClosed = live.IsClosed
+	}
+	for i := range mapping.Trackers {
+		item := &mapping.Trackers[i]
+		live, ok := trackerByID[item.RedmineTrackerID]
+		if item.RedmineTrackerID <= 0 || !ok || seenTrackers[item.RedmineTrackerID] {
+			return fmt.Errorf("redmine: tracker mapping id %d is invalid or duplicated", item.RedmineTrackerID)
+		}
+		seenTrackers[item.RedmineTrackerID] = true
+		item.RedmineName = live.Name
+		item.TaskLabel = strings.TrimSpace(item.TaskLabel)
+	}
+	for i := range mapping.Priorities {
+		item := &mapping.Priorities[i]
+		live, ok := priorityByID[item.RedminePriorityID]
+		if item.RedminePriorityID <= 0 || !ok || seenPriorities[item.RedminePriorityID] {
+			return fmt.Errorf("redmine: priority mapping id %d is invalid or duplicated", item.RedminePriorityID)
+		}
+		if item.TaskPriority != "" && item.TaskPriority != "critical" && item.TaskPriority != "high" && item.TaskPriority != "medium" && item.TaskPriority != "low" {
+			return fmt.Errorf("redmine: task priority %q is invalid", item.TaskPriority)
+		}
+		seenPriorities[item.RedminePriorityID] = true
+		item.RedmineName = live.Name
+	}
+	return nil
 }
 
 func (p *redminePlugin) validateMappingWorkflow(ctx context.Context, workspaceID string, mapping fieldmapping.Mapping) error {

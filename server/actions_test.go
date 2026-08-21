@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -30,7 +31,7 @@ func redmineFixtureServer(t *testing.T, onPut func(statusID any)) *httptest.Serv
 			_, _ = w.Write([]byte(`{"user":{"id":1,"login":"alice"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/projects.json":
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"projects":[],"total_count":0}`))
+			_, _ = w.Write([]byte(`{"projects":[{"id":1,"name":"One"},{"id":2,"name":"Two"}],"total_count":2}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/issues/42.json":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"issue":{"id":42,"subject":"Fixture issue","status":{"id":2}}}`))
@@ -197,6 +198,39 @@ func TestHandleAction_ProjectsSaveThenList_PersistsSelection(t *testing.T) {
 	selected, ok := out["selected_ids"].([]any)
 	require.True(t, ok)
 	require.ElementsMatch(t, []any{float64(1), float64(2)}, selected)
+}
+
+func TestHandleAction_ProjectsSaveValidatesPaginatedVisibleIDsAndDedupes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/current.json":
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case "/projects.json":
+			offset := r.URL.Query().Get("offset")
+			start := 0
+			if offset == "100" {
+				start = 100
+			}
+			if offset == "200" {
+				start = 200
+			}
+			items := make([]map[string]any, 0, 100)
+			for id := start + 1; id <= 250 && id <= start+100; id++ {
+				items = append(items, map[string]any{"id": id, "name": fmt.Sprintf("P%d", id)})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"projects": items, "total_count": 250})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	p, _ := newTestPlugin()
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+	handle(t, p, "projects.save", "ws-1", "", map[string]any{"project_ids": []int{250, 1, 250}})
+	got := handle(t, p, "projects.list", "ws-1", "", nil)
+	require.Equal(t, []any{float64(1), float64(250)}, got["selected_ids"])
+	invalid := handle(t, p, "projects.save", "ws-1", "", map[string]any{"project_ids": []int{251}})
+	require.Contains(t, invalid["error"], "not visible")
 }
 
 func TestHandleAction_LinkSetThenGet_ResolvesAndPersistsLink(t *testing.T) {
