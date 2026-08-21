@@ -163,7 +163,7 @@ func TestUploadAttachment_ThenCreateIssue_IncludesTokenInUploadsArray(t *testing
 	upload, err := svc.UploadAttachment(context.Background(), "evidence.txt", "text/plain", strings.NewReader("file contents"))
 	require.NoError(t, err)
 	require.Equal(t, "abc123.def456", upload.Token)
-	require.Equal(t, "text/plain", gotUploadContentType)
+	require.Equal(t, "application/octet-stream", gotUploadContentType)
 	require.Equal(t, "evidence.txt", gotUploadFilename)
 	require.Equal(t, "file contents", string(gotUploadBody))
 

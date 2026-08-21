@@ -260,7 +260,10 @@ func (s *Service) UploadAttachment(ctx context.Context, filename, contentType st
 		contentType = "application/octet-stream"
 	}
 	var out uploadEnvelope
-	if err := s.client.PostBinary(ctx, "/uploads.json", contentType, content, map[string]string{"filename": filename}, &out); err != nil {
+	// Redmine's uploads endpoint accepts raw binary with this fixed transport
+	// media type. The user-provided MIME belongs to the later uploads[] issue
+	// metadata, not to this HTTP request.
+	if err := s.client.PostBinary(ctx, "/uploads.json", "application/octet-stream", content, map[string]string{"filename": filename}, &out); err != nil {
 		return Upload{}, err
 	}
 	return Upload{Token: out.Upload.Token, Filename: filename, ContentType: contentType}, nil

@@ -121,7 +121,7 @@ func TestHandleAction_IssueUploadAndCreateExposeFullWriteContract(t *testing.T) 
 	upload := handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "note.txt", "content_type": "text/plain", "content_base64": base64.StdEncoding.EncodeToString([]byte("hello"))})
 	require.Equal(t, "upload-token", upload["token"])
 	require.Equal(t, "note.txt", uploadFilename)
-	require.Equal(t, "text/plain", uploadContentType)
+	require.Equal(t, "application/octet-stream", uploadContentType)
 	require.Equal(t, "hello", string(uploadBody))
 
 	// Feed the upload action response verbatim into create, as a UI caller
