@@ -17,7 +17,9 @@ PKG_OUT := kandev-plugin-redmine-$(VERSION).tar.gz
 # "missing go.sum entry". Adding them would mean this template's go.sum has to
 # track every dependency the kandev backend grows, which `go mod tidy` then
 # fights over. Building it where it lives sidesteps all of that.
-KANDEV_SDK := ../kandev/apps/backend
+# Override this when the plugin and Kandev checkouts are not direct siblings,
+# for example in an isolated CI or task worktree.
+KANDEV_SDK ?= ../kandev/apps/backend
 
 ## Build the plugin binary for the host platform (development use). kandev
 ## itself always installs from `make package`/`package-host` output, not this.
