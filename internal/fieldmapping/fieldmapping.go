@@ -48,6 +48,7 @@ type CustomField struct {
 
 // Mapping is the full persisted per-workspace field mapping.
 type Mapping struct {
+	WorkflowID string            `json:"workflow_id"`
 	Statuses   []StatusMapping   `json:"statuses"`
 	Trackers   []TrackerMapping  `json:"trackers"`
 	Priorities []PriorityMapping `json:"priorities"`
@@ -163,14 +164,15 @@ func (m Mapping) toMap() map[string]any {
 		}
 	}
 	return map[string]any{
-		"statuses":   statuses,
-		"trackers":   trackers,
-		"priorities": priorities,
+		"workflow_id": m.WorkflowID,
+		"statuses":    statuses,
+		"trackers":    trackers,
+		"priorities":  priorities,
 	}
 }
 
 func mappingFromMap(m map[string]any) Mapping {
-	out := Mapping{}
+	out := Mapping{WorkflowID: asString(m["workflow_id"])}
 	for _, raw := range asSlice(m["statuses"]) {
 		row, ok := raw.(map[string]any)
 		if !ok {

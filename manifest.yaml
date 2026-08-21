@@ -84,7 +84,7 @@ actions:
   - { key: "syncoptions.save", scope: "workspace", max_body_bytes: 8192 }
   - { key: "issues.create", scope: "workspace", max_body_bytes: 65536 }
   - { key: "issues.update", scope: "workspace", max_body_bytes: 65536 }
-  - { key: "issues.upload", scope: "workspace", max_body_bytes: 49152 }
+  - { key: "issues.upload", scope: "workspace", max_body_bytes: 1048576 }
   - { key: "link.get", scope: "task", max_body_bytes: 8192 }
   - { key: "link.set", scope: "task", max_body_bytes: 8192 }
   - { key: "link.unset", scope: "task", max_body_bytes: 8192 }

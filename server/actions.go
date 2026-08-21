@@ -227,6 +227,7 @@ func (p *redminePlugin) handleProjectsSave(ctx context.Context, req *pluginsdk.P
 // --- fieldmapping.* -------------------------------------------------------
 
 type fieldMappingGetResponse struct {
+	WorkflowID          string                         `json:"workflow_id"`
 	Statuses            []fieldmapping.StatusMapping   `json:"statuses"`
 	Trackers            []fieldmapping.TrackerMapping  `json:"trackers"`
 	Priorities          []fieldmapping.PriorityMapping `json:"priorities"`
@@ -273,7 +274,8 @@ func (p *redminePlugin) handleFieldMappingGet(ctx context.Context, req *pluginsd
 	}
 
 	return jsonResponse(fieldMappingGetResponse{
-		Statuses: mapping.Statuses, Trackers: mapping.Trackers, Priorities: mapping.Priorities,
+		WorkflowID: mapping.WorkflowID,
+		Statuses:   mapping.Statuses, Trackers: mapping.Trackers, Priorities: mapping.Priorities,
 		LiveStatuses:        toNamedRefs(liveStatuses),
 		LiveTrackers:        toTrackerRefs(liveTrackers),
 		LivePriorities:      toPriorityRefs(livePriorities),
@@ -321,10 +323,47 @@ func (p *redminePlugin) handleFieldMappingSave(ctx context.Context, req *plugins
 	if err != nil {
 		return nil, err
 	}
+	if err := p.validateMappingWorkflow(ctx, req.Context.WorkspaceID, body); err != nil {
+		return classifiedErrorResponse(err)
+	}
 	if err := p.fieldmappingSvc.Save(ctx, req.Context.WorkspaceID, body); err != nil {
 		return nil, err
 	}
 	return jsonResponse(map[string]bool{"saved": true})
+}
+
+func (p *redminePlugin) validateMappingWorkflow(ctx context.Context, workspaceID string, mapping fieldmapping.Mapping) error {
+	if mapping.WorkflowID == "" {
+		return fmt.Errorf("redmine: workflow_id is required")
+	}
+	workflows, _, err := p.Host().Workflows().List(ctx, workspaceID, pluginsdk.Page{})
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, workflow := range workflows {
+		if workflow.ID == mapping.WorkflowID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("redmine: workflow %s does not belong to this workspace", mapping.WorkflowID)
+	}
+	steps, err := p.Host().Workflows().ListSteps(ctx, mapping.WorkflowID)
+	if err != nil {
+		return err
+	}
+	valid := make(map[string]bool, len(steps))
+	for _, step := range steps {
+		valid[step.ID] = true
+	}
+	for _, status := range mapping.Statuses {
+		if status.WorkflowStepID != "" && !valid[status.WorkflowStepID] {
+			return fmt.Errorf("redmine: workflow step %s is not in workflow %s", status.WorkflowStepID, mapping.WorkflowID)
+		}
+	}
+	return nil
 }
 
 // --- syncoptions.* --------------------------------------------------------

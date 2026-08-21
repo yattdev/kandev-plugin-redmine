@@ -132,7 +132,45 @@ func TestHandleAction_IssueUploadAndCreateExposeFullWriteContract(t *testing.T) 
 	require.True(t, ok)
 	require.EqualValues(t, 1, issue["project_id"])
 	require.Equal(t, "Created", issue["subject"])
-	require.Len(t, issue["uploads"], 1)
+	uploads, ok := issue["uploads"].([]any)
+	require.True(t, ok)
+	require.Len(t, uploads, 1)
+	createdUpload, ok := uploads[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "upload-token", createdUpload["token"])
+	require.Equal(t, "note.txt", createdUpload["filename"])
+	require.Equal(t, "text/plain", createdUpload["content_type"])
+}
+
+func TestHandleAction_IssueUpdateValidatesIDAndSendsFullPayload(t *testing.T) {
+	var updateBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/current.json":
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case "/issues/23.json":
+			require.Equal(t, http.MethodPut, r.Method)
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&updateBody))
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	p, _ := newTestPlugin()
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+
+	invalid := handle(t, p, "issues.update", "ws-1", "", map[string]any{"subject": "missing ID"})
+	require.Contains(t, invalid["error"], "issue_id")
+	updated := handle(t, p, "issues.update", "ws-1", "", map[string]any{"issue_id": 23, "project_id": 1, "tracker_id": 2, "status_id": 3, "priority_id": 4, "subject": "Updated", "description": "Body", "custom_fields": []any{map[string]any{"id": 9, "name": "Tier", "value": "Gold"}}, "uploads": []any{map[string]any{"token": "u", "filename": "note.txt", "content_type": "text/plain"}}})
+	require.Equal(t, true, updated["updated"])
+	issue, ok := updateBody["issue"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "Updated", issue["subject"])
+	require.EqualValues(t, 3, issue["status_id"])
+	uploads, ok := issue["uploads"].([]any)
+	require.True(t, ok)
+	require.Equal(t, "text/plain", uploads[0].(map[string]any)["content_type"])
 }
 
 func TestHandleAction_IssueUploadRejectsInvalidInput(t *testing.T) {
@@ -143,6 +181,8 @@ func TestHandleAction_IssueUploadRejectsInvalidInput(t *testing.T) {
 	require.Contains(t, out["error"], "invalid")
 	out = handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "x", "content_base64": ""})
 	require.Contains(t, out["error"], "required")
+	ok := handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "x", "content_base64": base64.StdEncoding.EncodeToString(make([]byte, maxAttachmentBytes))})
+	require.Contains(t, ok["error"], "no connection")
 	out = handle(t, p, "issues.upload", "ws-1", "", map[string]any{"filename": "x", "content_base64": base64.StdEncoding.EncodeToString(make([]byte, maxAttachmentBytes+1))})
 	require.Contains(t, out["error"], "exceeds")
 }

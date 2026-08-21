@@ -274,3 +274,32 @@ func TestConnect_ConcurrentWorkspacesDoNotLoseIndexEntries(t *testing.T) {
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"ws-1", "ws-2"}, ids)
 }
+
+func TestConnect_StateOrIndexFailureRollsBackSecretAndRecord(t *testing.T) {
+	for _, failure := range []struct {
+		name                string
+		scope, scopeID, key string
+	}{
+		{name: "record", scope: stateScope, scopeID: "ws-1", key: stateKey},
+		{name: "index", scope: indexScope, scopeID: indexScopeID, key: indexStateKey},
+	} {
+		t.Run(failure.name, func(t *testing.T) {
+			host := newFakeHost()
+			svc := New(host)
+			srv := validRedmineServer(t)
+			host.failNextStateWrite(failure.scope, failure.scopeID, failure.key)
+
+			_, err := svc.Connect(context.Background(), "ws-1", srv.URL, "good-key")
+			require.Error(t, err)
+			_, found, err := svc.Get(context.Background(), "ws-1")
+			require.NoError(t, err)
+			require.False(t, found)
+			_, found, err = host.GetSecret(context.Background(), secretKey("ws-1"))
+			require.NoError(t, err)
+			require.False(t, found)
+			ids, err := svc.ListWorkspaceIDs(context.Background())
+			require.NoError(t, err)
+			require.NotContains(t, ids, "ws-1")
+		})
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 
 	"kandev-plugin-redmine/internal/watch"
 
@@ -10,6 +11,8 @@ import (
 
 type watchResponse struct {
 	ID               string `json:"id"`
+	WorkflowID       string `json:"workflow_id"`
+	WorkflowStepID   string `json:"workflow_step_id"`
 	ProjectID        int    `json:"project_id"`
 	TrackerID        *int   `json:"tracker_id,omitempty"`
 	StatusID         *int   `json:"status_id,omitempty"`
@@ -19,7 +22,7 @@ type watchResponse struct {
 
 func toWatchResponse(w watch.Watch) watchResponse {
 	return watchResponse{
-		ID: w.ID, ProjectID: w.ProjectID, TrackerID: w.TrackerID, StatusID: w.StatusID,
+		ID: w.ID, WorkflowID: w.WorkflowID, WorkflowStepID: w.WorkflowStepID, ProjectID: w.ProjectID, TrackerID: w.TrackerID, StatusID: w.StatusID,
 		MaxInflightTasks: w.MaxInflightTasks, Enabled: w.Enabled,
 	}
 }
@@ -57,7 +60,11 @@ func (p *redminePlugin) handleWatchesCreate(ctx context.Context, req *pluginsdk.
 	if err != nil {
 		return nil, err
 	}
-	created, err := p.watchSvc.CreateWatch(ctx, body.toWatch(req.Context.WorkspaceID))
+	w, err := p.watchWithPlacement(ctx, req.Context.WorkspaceID, body.toWatch(req.Context.WorkspaceID))
+	if err != nil {
+		return nil, err
+	}
+	created, err := p.watchSvc.CreateWatch(ctx, w)
 	if err != nil {
 		return nil, err
 	}
@@ -69,11 +76,29 @@ func (p *redminePlugin) handleWatchesUpdate(ctx context.Context, req *pluginsdk.
 	if err != nil {
 		return nil, err
 	}
-	w := body.toWatch(req.Context.WorkspaceID)
+	w, err := p.watchWithPlacement(ctx, req.Context.WorkspaceID, body.toWatch(req.Context.WorkspaceID))
+	if err != nil {
+		return nil, err
+	}
 	if err := p.watchSvc.UpdateWatch(ctx, w); err != nil {
 		return nil, err
 	}
 	return jsonResponse(toWatchResponse(w))
+}
+
+func (p *redminePlugin) watchWithPlacement(ctx context.Context, workspaceID string, w watch.Watch) (watch.Watch, error) {
+	mapping, found, err := p.fieldmappingSvc.Get(ctx, workspaceID)
+	if err != nil {
+		return w, err
+	}
+	if !found || mapping.WorkflowID == "" {
+		return w, fmt.Errorf("redmine: save a workflow mapping before creating a watch")
+	}
+	w.WorkflowID = mapping.WorkflowID
+	if w.StatusID != nil {
+		w.WorkflowStepID, _ = mapping.WorkflowStepForStatus(*w.StatusID)
+	}
+	return w, nil
 }
 
 type watchDeleteRequest struct {

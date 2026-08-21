@@ -12,7 +12,10 @@ import (
 	"github.com/kandev/kandev/pkg/pluginsdk"
 )
 
-const maxAttachmentBytes = 32 * 1024
+// JSON/base64 action bodies are capped at 1 MiB by the host. Keep a little
+// headroom for base64 expansion and JSON framing, while allowing ordinary
+// screenshots. Larger files need a future binary/chunked host action API.
+const maxAttachmentBytes = 700 * 1024
 
 type issueWriteRequest struct {
 	IssueID      int                       `json:"issue_id"`
@@ -80,9 +83,6 @@ func (p *redminePlugin) handleIssueUpload(ctx context.Context, req *pluginsdk.Pl
 	}
 	if body.ContentBase64 == "" {
 		return classifiedErrorResponse(fmt.Errorf("redmine: attachment content_base64 is required"))
-	}
-	if base64.StdEncoding.DecodedLen(len(body.ContentBase64)) > maxAttachmentBytes {
-		return classifiedErrorResponse(fmt.Errorf("redmine: attachment exceeds %d bytes", maxAttachmentBytes))
 	}
 	content, err := base64.StdEncoding.DecodeString(body.ContentBase64)
 	if err != nil {

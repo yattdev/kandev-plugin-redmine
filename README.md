@@ -31,7 +31,8 @@ in `kdlbs/kandev` for the full design and task breakdown.
   `reference_sources` with submit-time reauthorization.
 - **Issue watchers** — one kandev task per newly matching issue, deduplicated
   and throttled per watch (`maxInflightTasks`), cascade-deleted via
-  `PluginOwnedTaskTrees` when the watch or connection is removed.
+  `PluginOwnedTaskTrees` when the watch or connection is removed. Disconnect
+  before uninstalling: host uninstall has no pre-uninstall task-tree hook.
 - **Settings UI** — `registerIntegrationSettings` contributes a native
   connection form, project picker, field-mapping table, sync-option toggles,
   and watcher management, rendered inside the kandev SPA (not an iframe).

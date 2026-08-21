@@ -282,6 +282,7 @@ function makeSettingsComponent(host) {
     const [loading, setLoading] = React.useState(true);
     const [live, setLive] = React.useState(null);
     const [workflows, setWorkflows] = React.useState([]);
+    const [workflowId, setWorkflowId] = React.useState("");
     const [statusSteps, setStatusSteps] = React.useState({});
     const [trackerLabels, setTrackerLabels] = React.useState({});
     const [priorityMap, setPriorityMap] = React.useState({});
@@ -298,7 +299,9 @@ function makeSettingsComponent(host) {
           invoke("workflows.list", workspaceId, {}),
         ]);
         setLive(fields);
-        setWorkflows((wf && wf.workflows) || []);
+        const availableWorkflows = (wf && wf.workflows) || [];
+        setWorkflows(availableWorkflows);
+        setWorkflowId(fields.workflow_id || (availableWorkflows[0] && availableWorkflows[0].id) || "");
 
         const steps = {};
         (fields.statuses || []).forEach((s) => {
@@ -331,7 +334,8 @@ function makeSettingsComponent(host) {
     if (!connected) return null;
     if (loading || !live) return h(Spinner, { id: "redmine-fieldmapping-loading" });
 
-    const allSteps = workflows.flatMap((wf) => wf.steps || []);
+    const selectedWorkflow = workflows.find((wf) => wf.id === workflowId);
+    const allSteps = (selectedWorkflow && selectedWorkflow.steps) || [];
 
     const onSave = async () => {
       const statuses = (live.live_statuses || []).map((s) => ({
@@ -350,7 +354,7 @@ function makeSettingsComponent(host) {
         redmine_name: p.name,
         task_priority: priorityMap[p.id] || "medium",
       }));
-      await invoke("fieldmapping.save", workspaceId, { statuses, trackers, priorities });
+      await invoke("fieldmapping.save", workspaceId, { workflow_id: workflowId, statuses, trackers, priorities });
       toast.success("Field mapping saved.");
     };
 
@@ -366,6 +370,17 @@ function makeSettingsComponent(host) {
       h(
         CardContent,
         { className: "space-y-6" },
+        h("div", null,
+          h(Label, { htmlFor: "redmine-mapping-workflow" }, "Kandev workflow"),
+          h("select", { id: "redmine-mapping-workflow", "data-testid": "redmine-mapping-workflow", value: workflowId, onChange: (event) => {
+            const nextWorkflowId = event.target.value;
+            const nextWorkflow = workflows.find((workflow) => workflow.id === nextWorkflowId);
+            const allowedStepIDs = new Set(((nextWorkflow && nextWorkflow.steps) || []).map((step) => step.id));
+            setWorkflowId(nextWorkflowId);
+            setStatusSteps((current) => Object.fromEntries(Object.entries(current).filter(([, stepID]) => allowedStepIDs.has(stepID))));
+          } },
+            workflows.map((workflow) => h("option", { key: workflow.id, value: workflow.id }, workflow.name))),
+        ),
         h(
           "div",
           null,

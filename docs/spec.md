@@ -10,10 +10,14 @@ workspace's state.
 
 - A connection consists of an HTTP(S) base URL and an API key sent only in
   `X-Redmine-API-Key`.
-- Each workspace has its own encrypted credential and state. Rotating or
+- Each workspace has its own credential and state. Credentials are encrypted
+  at rest by Kandev's host-managed secret store; the plugin only composes a
+  workspace-specific secret key. Rotating or
   disconnecting one connection cannot affect another workspace.
 - API keys are write-only: action responses, plugin state, logs, and task
   links must never disclose them.
+- v0.1 plugin-encrypted secrets are dual-read for upgrade compatibility and
+  rewritten through the host store on a best-effort read migration.
 - The settings UI uses authenticated manifest actions. The backend always uses
   the host-verified action context for workspace and task scope.
 - Redmine has no core webhooks. Health, inbound synchronization, and watches
@@ -42,7 +46,9 @@ workspace's state.
    immediately before submission.
 10. Create watcher tasks once per matching issue, deduplicate them, enforce the
     configured inflight cap, and delete owned task trees when a watch or its
-    connection is removed.
+    connection is removed. Disconnect before uninstall: host uninstall stops
+    the plugin and purges its state/secrets, but has no pre-uninstall hook to
+    delete plugin-owned task trees.
 11. Preserve state on Redmine failures, retry with bounded backoff, show
     degraded health, and resume cleanly after reconnecting or re-enabling the
     plugin.

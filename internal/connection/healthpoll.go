@@ -119,18 +119,10 @@ func (p *HealthPoller) probeAll(ctx context.Context) {
 }
 
 func (p *HealthPoller) probeOne(ctx context.Context, workspaceID string) {
-	record, found, err := p.svc.Get(ctx, workspaceID)
+	record, client, found, err := p.svc.clientSnapshot(ctx, workspaceID)
 	if err != nil || !found {
 		return
 	}
-
-	apiKey, err := p.svc.decryptedAPIKey(ctx, workspaceID)
-	if err != nil {
-		_ = p.svc.markDegraded(ctx, workspaceID, record, err.Error())
-		return
-	}
-
-	client := redmineclient.New(record.BaseURL, apiKey, p.svc.httpClient)
 	if _, err := client.ValidateCredentials(ctx); err != nil {
 		var apiErr *redmineclient.APIError
 		if errors.As(err, &apiErr) && (apiErr.Kind == redmineclient.ErrKindInvalidCredentials || apiErr.Kind == redmineclient.ErrKindAPIDisabled) {

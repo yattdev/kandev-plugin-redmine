@@ -37,6 +37,8 @@ var terminalTaskStates = map[string]bool{"COMPLETED": true, "FAILED": true, "CAN
 type Watch struct {
 	ID               string
 	WorkspaceID      string
+	WorkflowID       string
+	WorkflowStepID   string
 	ProjectID        int
 	TrackerID        *int
 	StatusID         *int
@@ -220,6 +222,14 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) error {
 	task, err := s.host.Tasks().Create(ctx, pluginsdk.CreateTaskInput{
 		WorkspaceID: w.WorkspaceID,
+		WorkflowID:  w.WorkflowID,
+		WorkflowStepID: func() *string {
+			if w.WorkflowStepID == "" {
+				return nil
+			}
+			step := w.WorkflowStepID
+			return &step
+		}(),
 		Title:       fmt.Sprintf("Redmine #%d: %s", issue.ID, issue.Subject),
 		Description: issue.Description,
 		Metadata: map[string]any{
@@ -356,6 +366,8 @@ func (s *Service) saveWatchList(ctx context.Context, workspaceID string, watches
 func (w Watch) toMap() map[string]any {
 	m := map[string]any{
 		"id":                 w.ID,
+		"workflow_id":        w.WorkflowID,
+		"workflow_step_id":   w.WorkflowStepID,
 		"project_id":         w.ProjectID,
 		"max_inflight_tasks": w.MaxInflightTasks,
 		"enabled":            w.Enabled,
@@ -373,6 +385,12 @@ func watchFromMap(workspaceID string, m map[string]any) Watch {
 	w := Watch{WorkspaceID: workspaceID}
 	if v, ok := m["id"].(string); ok {
 		w.ID = v
+	}
+	if v, ok := m["workflow_id"].(string); ok {
+		w.WorkflowID = v
+	}
+	if v, ok := m["workflow_step_id"].(string); ok {
+		w.WorkflowStepID = v
 	}
 	if v, ok := m["project_id"].(float64); ok {
 		w.ProjectID = int(v)

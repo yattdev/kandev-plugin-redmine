@@ -22,12 +22,14 @@ type fakeHost struct {
 	state        map[string]map[string]any
 	secrets      map[string]string
 	setSecretErr error
+	setStateErr  map[string]error
 }
 
 func newFakeHost() *fakeHost {
 	return &fakeHost{
-		state:   make(map[string]map[string]any),
-		secrets: make(map[string]string),
+		state:       make(map[string]map[string]any),
+		secrets:     make(map[string]string),
+		setStateErr: make(map[string]error),
 	}
 }
 
@@ -43,8 +45,19 @@ func (h *fakeHost) GetState(_ context.Context, scope, scopeID, key string) (map[
 func (h *fakeHost) SetState(_ context.Context, scope, scopeID, key string, value map[string]any) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.state[stateKeyOf(scope, scopeID, key)] = jsonRoundTrip(value)
+	stateKey := stateKeyOf(scope, scopeID, key)
+	if err := h.setStateErr[stateKey]; err != nil {
+		delete(h.setStateErr, stateKey)
+		return err
+	}
+	h.state[stateKey] = jsonRoundTrip(value)
 	return nil
+}
+
+func (h *fakeHost) failNextStateWrite(scope, scopeID, key string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.setStateErr[stateKeyOf(scope, scopeID, key)] = errors.New("temporary state-store failure")
 }
 
 func (h *fakeHost) DeleteState(_ context.Context, scope, scopeID, key string) error {
