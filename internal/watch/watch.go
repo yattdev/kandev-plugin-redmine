@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strconv"
+	"sync"
 
 	"kandev-plugin-redmine/internal/issues"
 
@@ -67,6 +68,7 @@ const (
 
 type Service struct {
 	host pluginsdk.Host
+	mu   sync.Mutex
 }
 
 func New(host pluginsdk.Host) *Service {
@@ -75,6 +77,8 @@ func New(host pluginsdk.Host) *Service {
 
 // CreateWatch persists a new watch with a fresh ID.
 func (s *Service) CreateWatch(ctx context.Context, w Watch) (Watch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	id, err := newWatchID()
 	if err != nil {
 		return Watch{}, err
@@ -89,10 +93,16 @@ func (s *Service) CreateWatch(ctx context.Context, w Watch) (Watch, error) {
 // UpdateWatch persists changes to an existing watch (identified by w.ID),
 // including enabling/disabling it.
 func (s *Service) UpdateWatch(ctx context.Context, w Watch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updateWatchLocked(ctx, w)
+}
+
+func (s *Service) updateWatchLocked(ctx context.Context, w Watch) error {
 	if w.ID == "" {
 		return fmt.Errorf("watch: id is required for update")
 	}
-	watches, err := s.ListWatches(ctx, w.WorkspaceID)
+	watches, err := s.listWatchesLocked(ctx, w.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -106,6 +116,12 @@ func (s *Service) UpdateWatch(ctx context.Context, w Watch) error {
 
 // ListWatches returns every watch for workspaceID.
 func (s *Service) ListWatches(ctx context.Context, workspaceID string) ([]Watch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listWatchesLocked(ctx, workspaceID)
+}
+
+func (s *Service) listWatchesLocked(ctx context.Context, workspaceID string) ([]Watch, error) {
 	value, found, err := s.host.GetState(ctx, workspaceScope, workspaceID, watchesKey)
 	if err != nil {
 		return nil, fmt.Errorf("watch: reading watches: %w", err)
@@ -129,10 +145,16 @@ func (s *Service) ListWatches(ctx context.Context, workspaceID string) ([]Watch,
 // via PluginOwnedTaskTrees, so disabling/removing a watch never leaves
 // orphaned tasks behind.
 func (s *Service) DeleteWatch(ctx context.Context, workspaceID, watchID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteWatchLocked(ctx, workspaceID, watchID)
+}
+
+func (s *Service) deleteWatchLocked(ctx context.Context, workspaceID, watchID string) error {
 	if watchID == "" {
 		return fmt.Errorf("watch: id is required for delete")
 	}
-	watches, err := s.ListWatches(ctx, workspaceID)
+	watches, err := s.listWatchesLocked(ctx, workspaceID)
 	if err != nil {
 		return err
 	}
@@ -165,12 +187,14 @@ func (s *Service) DeleteWatch(ctx context.Context, workspaceID, watchID string) 
 
 // ClearWorkspace removes all watches and their plugin-owned task trees.
 func (s *Service) ClearWorkspace(ctx context.Context, workspaceID string) error {
-	watches, err := s.ListWatches(ctx, workspaceID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	watches, err := s.listWatchesLocked(ctx, workspaceID)
 	if err != nil {
 		return err
 	}
 	for _, w := range watches {
-		if err := s.DeleteWatch(ctx, workspaceID, w.ID); err != nil {
+		if err := s.deleteWatchLocked(ctx, workspaceID, w.ID); err != nil {
 			return err
 		}
 	}
@@ -181,7 +205,12 @@ func (s *Service) ClearWorkspace(ctx context.Context, workspaceID string) error 
 // matching, not-yet-seen issue, subject to the maxInflightTasks throttle. A
 // disabled watch is a no-op.
 func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !w.Enabled {
+		return nil
+	}
+	if !s.watchExistsLocked(ctx, w.WorkspaceID, w.ID) {
 		return nil
 	}
 
@@ -219,6 +248,19 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 			return nil
 		}
 	}
+}
+
+func (s *Service) watchExistsLocked(ctx context.Context, workspaceID, watchID string) bool {
+	watches, err := s.listWatchesLocked(ctx, workspaceID)
+	if err != nil {
+		return false
+	}
+	for _, candidate := range watches {
+		if candidate.ID == watchID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) error {
@@ -328,7 +370,7 @@ func (s *Service) recordWatchTask(ctx context.Context, workspaceID, watchID stri
 }
 
 func (s *Service) saveWatchInList(ctx context.Context, w Watch) error {
-	watches, err := s.ListWatches(ctx, w.WorkspaceID)
+	watches, err := s.listWatchesLocked(ctx, w.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -347,7 +389,7 @@ func (s *Service) saveWatchInList(ctx context.Context, w Watch) error {
 }
 
 func (s *Service) removeWatchFromList(ctx context.Context, workspaceID, watchID string) error {
-	watches, err := s.ListWatches(ctx, workspaceID)
+	watches, err := s.listWatchesLocked(ctx, workspaceID)
 	if err != nil {
 		return err
 	}

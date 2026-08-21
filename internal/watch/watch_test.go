@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"kandev-plugin-redmine/internal/issues"
@@ -19,6 +20,51 @@ func newIssuesService(t *testing.T, handler http.HandlerFunc) *issues.Service {
 	t.Cleanup(srv.Close)
 	client := redmineclient.New(srv.URL, "key", srv.Client())
 	return issues.New(client)
+}
+
+func TestPoll_ConcurrentCallsCreateOnlyOneTask(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	issuesSvc := newIssuesService(t, oneIssuePage(42, "New issue"))
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() { defer wg.Done(); errs <- svc.Poll(context.Background(), w, issuesSvc) }()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Len(t, host.tasks, 1)
+}
+
+func TestPoll_RacingDeleteLeavesNoOwnedTaskOrIndex(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	issuesSvc := newIssuesService(t, oneIssuePage(42, "New issue"))
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); errs <- svc.Poll(context.Background(), w, issuesSvc) }()
+	go func() { defer wg.Done(); errs <- svc.DeleteWatch(context.Background(), "ws-1", w.ID) }()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Empty(t, host.tasks)
+	watches, err := svc.ListWatches(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.Empty(t, watches)
+	tasks, err := svc.watchTasks(context.Background(), "ws-1", w.ID)
+	require.NoError(t, err)
+	require.Empty(t, tasks)
 }
 
 func oneIssuePage(id int, subject string) http.HandlerFunc {
