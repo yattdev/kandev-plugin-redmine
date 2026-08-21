@@ -137,3 +137,47 @@ func TestSet_RelinkRemovesOldIndexAndRejectsDuplicateIssue(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, "task-1", taskID)
 }
+
+func TestSet_RelinkIndexFailuresRestoreForwardAndReverseLinks(t *testing.T) {
+	for _, targetWorkspace := range []string{"ws-1", "ws-2"} {
+		t.Run(targetWorkspace, func(t *testing.T) {
+			host := newFakeHost()
+			svc := New(host)
+			require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+			if targetWorkspace == "ws-1" {
+				host.failNextSet(workspaceScope, "ws-1", indexKey)
+			} else {
+				host.failNextSet(workspaceScope, "ws-2", indexKey)
+			}
+			require.Error(t, svc.Set(context.Background(), "task-1", targetWorkspace, 43, "url"))
+			link, found, err := svc.Get(context.Background(), "task-1")
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, "ws-1", link.WorkspaceID)
+			require.Equal(t, 42, link.IssueID)
+			taskID, found, err := svc.TaskIDForIssue(context.Background(), "ws-1", 42)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, "task-1", taskID)
+			_, found, err = svc.TaskIDForIssue(context.Background(), targetWorkspace, 43)
+			require.NoError(t, err)
+			require.False(t, found)
+		})
+	}
+}
+
+func TestUnset_IndexFailureRestoresLinkAndReverseIndex(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	host.failNextSet(workspaceScope, "ws-1", indexKey)
+	require.Error(t, svc.Unset(context.Background(), "task-1"))
+	link, found, err := svc.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, 42, link.IssueID)
+	taskID, found, err := svc.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "task-1", taskID)
+}

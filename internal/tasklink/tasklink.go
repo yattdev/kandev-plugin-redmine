@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -66,15 +67,31 @@ func (s *Service) Set(ctx context.Context, taskID, workspaceID string, issueID i
 		return err
 	}
 	link := Link{IssueID: issueID, IssueURL: issueURL, WorkspaceID: workspaceID}
+	oldSnapshot, err := s.indexSnapshot(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	var priorSnapshot indexState
+	if found && previous.WorkspaceID != workspaceID {
+		priorSnapshot, err = s.indexSnapshot(ctx, previous.WorkspaceID)
+		if err != nil {
+			return err
+		}
+	} else {
+		priorSnapshot = oldSnapshot
+	}
 	if err := s.save(ctx, taskID, link); err != nil {
 		return err
 	}
 	if found && (previous.WorkspaceID != workspaceID || previous.IssueID != issueID) {
 		if err := s.removeFromIndexIfOwned(ctx, previous.WorkspaceID, previous.IssueID, taskID); err != nil {
-			return err
+			return s.rollbackSet(ctx, taskID, previous, found, oldSnapshot, previous.WorkspaceID, priorSnapshot, err)
 		}
 	}
-	return s.addToIndex(ctx, workspaceID, issueID, taskID)
+	if err := s.addToIndex(ctx, workspaceID, issueID, taskID); err != nil {
+		return s.rollbackSet(ctx, taskID, previous, found, oldSnapshot, previous.WorkspaceID, priorSnapshot, err)
+	}
+	return nil
 }
 
 // Get returns the current link for taskID, if any.
@@ -105,13 +122,82 @@ func (s *Service) Unset(ctx context.Context, taskID string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.host.DeleteState(ctx, taskScope, taskID, linkKey); err != nil {
-		return fmt.Errorf("tasklink: deleting link: %w", err)
-	}
 	if !found {
 		return nil
 	}
-	return s.removeFromIndexIfOwned(ctx, link.WorkspaceID, link.IssueID, taskID)
+	index, err := s.indexSnapshot(ctx, link.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	if err := s.host.DeleteState(ctx, taskScope, taskID, linkKey); err != nil {
+		return fmt.Errorf("tasklink: deleting link: %w", err)
+	}
+	if err := s.removeFromIndexIfOwned(ctx, link.WorkspaceID, link.IssueID, taskID); err != nil {
+		rollbackErr := s.restoreLinkAndIndex(ctx, taskID, link, index)
+		return wrapRollbackError(err, rollbackErr)
+	}
+	return nil
+}
+
+type indexState struct {
+	workspaceID string
+	found       bool
+	value       map[string]string
+}
+
+func (s *Service) indexSnapshot(ctx context.Context, workspaceID string) (indexState, error) {
+	value, found, err := s.host.GetState(ctx, workspaceScope, workspaceID, indexKey)
+	if err != nil {
+		return indexState{}, fmt.Errorf("tasklink: reading issue index: %w", err)
+	}
+	index := make(map[string]string)
+	if found {
+		for issue, task := range value["issue_id_to_task_id"].(map[string]any) {
+			if id, ok := task.(string); ok {
+				index[issue] = id
+			}
+		}
+	}
+	return indexState{workspaceID: workspaceID, found: found, value: index}, nil
+}
+
+func (s *Service) restoreIndex(ctx context.Context, snapshot indexState) error {
+	if !snapshot.found {
+		return s.host.DeleteState(ctx, workspaceScope, snapshot.workspaceID, indexKey)
+	}
+	return s.saveIndex(ctx, snapshot.workspaceID, snapshot.value)
+}
+
+func (s *Service) restoreLinkAndIndex(ctx context.Context, taskID string, link *Link, index indexState) error {
+	if err := s.save(ctx, taskID, *link); err != nil {
+		return err
+	}
+	return s.restoreIndex(ctx, index)
+}
+
+func (s *Service) rollbackSet(ctx context.Context, taskID string, previous *Link, hadPrevious bool, newIndex indexState, oldWorkspace string, oldIndex indexState, cause error) error {
+	var rollbackErr error
+	if hadPrevious {
+		rollbackErr = s.save(ctx, taskID, *previous)
+	} else {
+		rollbackErr = s.host.DeleteState(ctx, taskScope, taskID, linkKey)
+	}
+	if err := s.restoreIndex(ctx, newIndex); err != nil && rollbackErr == nil {
+		rollbackErr = err
+	}
+	if oldWorkspace != newIndex.workspaceID {
+		if err := s.restoreIndex(ctx, oldIndex); err != nil && rollbackErr == nil {
+			rollbackErr = err
+		}
+	}
+	return wrapRollbackError(cause, rollbackErr)
+}
+
+func wrapRollbackError(cause, rollbackErr error) error {
+	if rollbackErr == nil {
+		return cause
+	}
+	return fmt.Errorf("tasklink: operation failed and rollback failed: %w", errors.Join(cause, rollbackErr))
 }
 
 // TaskIDForIssue resolves the reverse index: which task, if any, is linked
