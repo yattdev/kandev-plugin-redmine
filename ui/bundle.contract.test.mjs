@@ -6,7 +6,7 @@ const bundle = await readFile(new URL("./bundle.js", import.meta.url), "utf8");
 
 async function loadBundleTestHooks() {
   globalThis.window = { registerKandevPlugin() {} };
-  const source = `${bundle}\nglobalThis.__redmineBundleTestHooks = { createSyncSaveController, workspaceActionInvoke, taskActionInvoke };`;
+  const source = `${bundle}\nglobalThis.__redmineBundleTestHooks = { createSyncSaveController, syncControllerForWorkspace, workspaceActionInvoke, taskActionInvoke };`;
   await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
   return globalThis.__redmineBundleTestHooks;
 }
@@ -112,4 +112,24 @@ test("sync saves are serialized and use workspace-only action context", async ()
   const contexts = [];
   await workspaceActionInvoke({ api: { invokeAction: async (_key, context) => { contexts.push(context); return {}; } } }, "projects.save", { workspaceId: "workspace-1", taskId: "must-not-send" }, {});
   assert.deepEqual(contexts, [{ workspaceId: "workspace-1", body: {} }]);
+});
+
+test("sync controller is recreated when the settings workspace changes", async () => {
+  const { syncControllerForWorkspace } = await loadBundleTestHooks();
+  const ref = { current: null };
+  const calls = [];
+  const make = (workspaceId) => syncControllerForWorkspace(
+    ref,
+    async (key, targetWorkspaceId, body) => { calls.push({ key, workspaceId: targetWorkspaceId, body }); },
+    workspaceId,
+    { error() {} },
+    () => {},
+    () => {},
+  );
+  const first = make("workspace-1");
+  await first.update("autoStatusWriteback", true);
+  const second = make("workspace-2");
+  await second.update("syncTitleDescription", true);
+  assert.notEqual(first, second);
+  assert.deepEqual(calls.map((call) => call.workspaceId), ["workspace-1", "workspace-2"]);
 });

@@ -120,6 +120,13 @@ function createSyncSaveController(invoke, workspaceId, toast, apply, setSaving) 
   };
 }
 
+function syncControllerForWorkspace(ref, invoke, workspaceId, toast, apply, setSaving) {
+  if (!ref.current || ref.current.workspaceId !== workspaceId) {
+    ref.current = { workspaceId, controller: createSyncSaveController(invoke, workspaceId, toast, apply, setSaving) };
+  }
+  return ref.current.controller;
+}
+
 function makeSetRedmineStatusAction(host) {
   const h = host.jsx;
   return {
@@ -616,9 +623,9 @@ function makeSettingsComponent(host) {
     const [syncTitleDescription, setSyncTitleDescription] = React.useState(false);
     const [loading, setLoading] = React.useState(true);
     const [saving, setSaving] = React.useState(false);
-    const controller = React.useRef(null);
-    if (!controller.current) {
-      controller.current = createSyncSaveController(
+    const controllerRef = React.useRef(null);
+    const controller = syncControllerForWorkspace(
+        controllerRef,
         invoke,
         workspaceId,
         toast,
@@ -628,7 +635,6 @@ function makeSettingsComponent(host) {
         },
         setSaving,
       );
-    }
 
     React.useEffect(() => {
       if (!connected) { setLoading(false); return; }
@@ -636,7 +642,7 @@ function makeSettingsComponent(host) {
       invoke("syncoptions.get", workspaceId, {}).then((options) => {
         if (!active) return;
         const next = { autoStatusWriteback: Boolean(options.auto_status_writeback), syncTitleDescription: Boolean(options.sync_title_description) };
-        controller.current.setOptions(next);
+        controller.setOptions(next);
         setAutoStatusWriteback(next.autoStatusWriteback);
         setSyncTitleDescription(next.syncTitleDescription);
       }).catch((err) => toast.error(errorMessage(err))).finally(() => { if (active) setLoading(false); });
@@ -667,7 +673,7 @@ function makeSettingsComponent(host) {
             checked: autoStatusWriteback,
             disabled: saving,
             onCheckedChange: (checked) => {
-              controller.current.update("autoStatusWriteback", checked);
+              void controller.update("autoStatusWriteback", checked);
             },
           }),
         ),
@@ -685,7 +691,7 @@ function makeSettingsComponent(host) {
             checked: syncTitleDescription,
             disabled: saving,
             onCheckedChange: (checked) => {
-              controller.current.update("syncTitleDescription", checked);
+              void controller.update("syncTitleDescription", checked);
             },
           }),
         ),
