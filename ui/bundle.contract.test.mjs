@@ -27,3 +27,39 @@ test("primary task menu actions retain Link and use verified task actions", () =
   for (const key of ["link.get", "fieldmapping.get", "link.set_status", "link.unset"]) assert.match(bundle, new RegExp(`"${key}"`));
   for (const id of ["redmine-status-modal", "redmine-status-picker", "redmine-status-confirm", "redmine-unlink-modal", "redmine-unlink-confirm"]) assert.match(bundle, new RegExp(id));
 });
+
+test("manual status uses workspace scope for field mappings and task scope for links", async () => {
+  let registration;
+  globalThis.window = {
+    registerKandevPlugin(_id, value) {
+      registration = value;
+    },
+  };
+  await import(new URL(`./bundle.js?manual-status-contract=${Date.now()}`, import.meta.url));
+
+  const menuActions = [];
+  const calls = [];
+  const host = {
+    jsx: () => null,
+    React: {},
+    ui: {},
+    toast: { success() {}, error() {} },
+    openModal() { return { close() {} }; },
+    api: {
+      async invokeAction(key, context) {
+        calls.push({ key, context });
+        if (key === "link.get") return { linked: true };
+        if (key === "fieldmapping.get") return { live_statuses: [] };
+        throw new Error(`unexpected action ${key}`);
+      },
+    },
+  };
+  registration.initialize({ registerTaskAction() {}, registerTaskMenuAction(action) { menuActions.push(action); }, registerIntegrationSettings() {} }, host);
+  const action = menuActions.find((candidate) => candidate.id === "redmine-set-status");
+  await action.run({ workspaceId: "workspace-1", taskId: "task-1" });
+
+  assert.deepEqual(calls, [
+    { key: "link.get", context: { workspaceId: "workspace-1", taskId: "task-1", body: {} } },
+    { key: "fieldmapping.get", context: { workspaceId: "workspace-1", body: {} } },
+  ]);
+});

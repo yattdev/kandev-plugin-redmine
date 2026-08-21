@@ -71,11 +71,19 @@ function makeLinkTaskAction(host) {
   };
 }
 
-function taskActionInvoke(host, key, context, body) {
-  return host.api.invokeAction(key, { workspaceId: context.workspaceId, taskId: context.taskId, body }).then((result) => {
+function actionInvoke(host, key, actionContext, body) {
+  return host.api.invokeAction(key, { ...actionContext, body }).then((result) => {
     if (result && result.kind) throw new Error(result.error || "Redmine action failed.");
     return result;
   });
+}
+
+function workspaceActionInvoke(host, key, context, body) {
+  return actionInvoke(host, key, { workspaceId: context.workspaceId }, body);
+}
+
+function taskActionInvoke(host, key, context, body) {
+  return actionInvoke(host, key, { workspaceId: context.workspaceId, taskId: context.taskId }, body);
 }
 
 function makeSetRedmineStatusAction(host) {
@@ -86,7 +94,7 @@ function makeSetRedmineStatusAction(host) {
       try {
         const link = await taskActionInvoke(host, "link.get", context, {});
         if (!link.linked) throw new Error("Link this task to a Redmine issue first.");
-        const fields = await taskActionInvoke(host, "fieldmapping.get", context, {});
+        const fields = await workspaceActionInvoke(host, "fieldmapping.get", context, {});
         const statuses = fields.live_statuses || [];
         const closeRef = {};
         function StatusModal() {

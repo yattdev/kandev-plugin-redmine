@@ -51,6 +51,9 @@ func parseIssueReference(reference, baseURL string) (int, error) {
 	if err != nil || !u.IsAbs() {
 		return 0, fmt.Errorf("redmine: %q does not look like a Redmine issue ID or URL", reference)
 	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return 0, fmt.Errorf("redmine: issue URL must not contain userinfo, query, or fragment")
+	}
 	base, err := url.Parse(baseURL)
 	if err != nil || u.Scheme != base.Scheme || u.Host != base.Host {
 		return 0, fmt.Errorf("redmine: issue URL must use configured Redmine origin")

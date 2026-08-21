@@ -277,7 +277,7 @@ func TestParseIssueReferenceAcceptsConfiguredSubpathOnly(t *testing.T) {
 	id, err := parseIssueReference(base+"/issues/42/", base)
 	require.NoError(t, err)
 	require.Equal(t, 42, id)
-	for _, reference := range []string{"https://redmine.example/issues/42", "https://redmine.example/redmine/projects/42", "https://other.example/redmine/issues/42"} {
+	for _, reference := range []string{"https://redmine.example/issues/42", "https://redmine.example/redmine/projects/42", "https://other.example/redmine/issues/42", "https://user@redmine.example/redmine/issues/42", "https://redmine.example/redmine/issues/42?x=1", "https://redmine.example/redmine/issues/42#notes"} {
 		_, err := parseIssueReference(reference, base)
 		require.Error(t, err, reference)
 	}
