@@ -89,6 +89,20 @@ func (p *redminePlugin) handleLinkSet(ctx context.Context, req *pluginsdk.Plugin
 	if err != nil {
 		return classifiedErrorResponse(err)
 	}
+	selected, err := p.projectsSvc.GetSelection(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	allowed := false
+	for _, projectID := range selected {
+		if projectID == issue.ProjectID {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return classifiedErrorResponse(fmt.Errorf("redmine: issue project is not selected for this workspace"))
+	}
 
 	if err := p.tasklinkSvc.Set(ctx, req.Context.TaskID, req.Context.WorkspaceID, issue.ID, issue.URL); err != nil {
 		return nil, err
@@ -127,6 +141,23 @@ func (p *redminePlugin) handleLinkSetStatus(ctx context.Context, req *pluginsdk.
 	client, err := p.connectionSvc.Client(ctx, req.Context.WorkspaceID)
 	if err != nil {
 		return classifiedErrorResponse(err)
+	}
+	if body.StatusID <= 0 {
+		return classifiedErrorResponse(fmt.Errorf("redmine: status_id must be positive"))
+	}
+	statuses, err := client.ListIssueStatuses(ctx)
+	if err != nil {
+		return classifiedErrorResponse(err)
+	}
+	valid := false
+	for _, candidate := range statuses {
+		if candidate.ID == body.StatusID {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return classifiedErrorResponse(fmt.Errorf("redmine: status_id %d is not available", body.StatusID))
 	}
 
 	if err := p.syncSvc.ForceWriteback(ctx, req.Context.TaskID, body.StatusID, issues.New(client)); err != nil {

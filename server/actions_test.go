@@ -34,7 +34,10 @@ func redmineFixtureServer(t *testing.T, onPut func(statusID any)) *httptest.Serv
 			_, _ = w.Write([]byte(`{"projects":[{"id":1,"name":"One"},{"id":2,"name":"Two"}],"total_count":2}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/issues/42.json":
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"issue":{"id":42,"subject":"Fixture issue","status":{"id":2}}}`))
+			_, _ = w.Write([]byte(`{"issue":{"id":42,"subject":"Fixture issue","project":{"id":1},"status":{"id":2}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/issue_statuses.json":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"issue_statuses":[{"id":2,"name":"Open"},{"id":5,"name":"Done"}]}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/issues/42.json":
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -237,6 +240,7 @@ func TestHandleAction_LinkSetThenGet_ResolvesAndPersistsLink(t *testing.T) {
 	p, _ := newTestPlugin()
 	srv := redmineFixtureServer(t, nil)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
 
 	out := handle(t, p, "link.set", "ws-1", "task-1", map[string]any{"reference": "#42"})
 	require.Equal(t, true, out["linked"])
@@ -246,10 +250,60 @@ func TestHandleAction_LinkSetThenGet_ResolvesAndPersistsLink(t *testing.T) {
 	require.Equal(t, true, got["linked"])
 }
 
+func TestHandleAction_LinkSetRejectsIssueOutsideSelectedProjects(t *testing.T) {
+	p, _ := newTestPlugin()
+	srv := redmineFixtureServer(t, nil)
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{2}))
+
+	out := handle(t, p, "link.set", "ws-1", "task-1", map[string]any{"reference": "#42"})
+	require.Contains(t, out["error"], "not selected")
+	got := handle(t, p, "link.get", "ws-1", "task-1", nil)
+	require.False(t, got["linked"].(bool))
+}
+
+func TestHandleAction_LinkSetRejectsUntrustedIssueReferences(t *testing.T) {
+	p, _ := newTestPlugin()
+	srv := redmineFixtureServer(t, nil)
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
+	for _, reference := range []string{"abc42", "#0", "https://other.example/issues/42", srv.URL + "/projects/42", srv.URL + "/issues/999999999999999999999999"} {
+		out := handle(t, p, "link.set", "ws-1", "task-1", map[string]any{"reference": reference})
+		require.NotEmpty(t, out["error"], reference)
+	}
+}
+
+func TestParseIssueReferenceAcceptsConfiguredSubpathOnly(t *testing.T) {
+	base := "https://redmine.example/redmine"
+	id, err := parseIssueReference(base+"/issues/42/", base)
+	require.NoError(t, err)
+	require.Equal(t, 42, id)
+	for _, reference := range []string{"https://redmine.example/issues/42", "https://redmine.example/redmine/projects/42", "https://other.example/redmine/issues/42"} {
+		_, err := parseIssueReference(reference, base)
+		require.Error(t, err, reference)
+	}
+}
+
+func TestHandleAction_LinkSetStatusValidatesLiveStatus(t *testing.T) {
+	p, _ := newTestPlugin()
+	var pushed any
+	srv := redmineFixtureServer(t, func(statusID any) { pushed = statusID })
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
+	require.NoError(t, p.tasklinkSvc.Set(context.Background(), "task-1", "ws-1", 42, srv.URL+"/issues/42"))
+
+	for _, statusID := range []int{0, -1, 99} {
+		out := handle(t, p, "link.set_status", "ws-1", "task-1", map[string]any{"status_id": statusID})
+		require.NotEmpty(t, out["error"])
+	}
+	out := handle(t, p, "link.set_status", "ws-1", "task-1", map[string]any{"status_id": 5})
+	require.Equal(t, true, out["pushed"])
+	require.EqualValues(t, 5, pushed)
+}
+
 func TestHandleAction_LinkUnset_RemovesLink(t *testing.T) {
 	p, _ := newTestPlugin()
 	srv := redmineFixtureServer(t, nil)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
 	handle(t, p, "link.set", "ws-1", "task-1", map[string]any{"reference": "#42"})
 
 	handle(t, p, "link.unset", "ws-1", "task-1", nil)
@@ -263,6 +317,7 @@ func TestOnEvent_TaskMoved_PushesWritebackForLinkedTaskWithMappedStep(t *testing
 	var pushedStatus any
 	srv := redmineFixtureServer(t, func(statusID any) { pushedStatus = statusID })
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
 	handle(t, p, "link.set", "ws-1", "task-1", map[string]any{"reference": "#42"})
 
 	require.NoError(t, p.fieldmappingSvc.Save(context.Background(), "ws-1", fieldmapping.Mapping{
@@ -411,6 +466,7 @@ func TestOnEvent_TaskMoved_AutoWritebackEnabled_PushesStatus(t *testing.T) {
 	var pushedStatus any
 	srv := redmineFixtureServer(t, func(statusID any) { pushedStatus = statusID })
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "good-key"})
+	require.NoError(t, p.projectsSvc.SaveSelection(context.Background(), "ws-1", []int{1}))
 	handle(t, p, "link.set", "ws-1", "task-1", map[string]any{"reference": "#42"})
 
 	require.NoError(t, p.fieldmappingSvc.Save(context.Background(), "ws-1", fieldmapping.Mapping{
