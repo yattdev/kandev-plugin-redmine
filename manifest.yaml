@@ -8,16 +8,16 @@ api_version: 1
 version: "0.2.0"
 display_name: "Redmine"
 description: "Connect a Redmine instance: link kandev tasks to Redmine issues, sync status both ways, and watch for new issues."
-author: "kandev"
+author: "yattdev"
 categories: ["connector"]
 repo_url: "https://github.com/yattdev/kandev-plugin-redmine"
 
-# min_kandev_version: "0.88.0" is the release that first carries PR #2117's
-# generic plugin seams this plugin depends on (registerIntegrationSettings,
-# registerTaskAction({placement:"link"}), reference_sources, the
-# PluginOwnedTaskTrees RPCs) — merge commit f218880e is first reachable from
-# tag v0.88.0.
-min_kandev_version: "0.88.0"
+# Provisional conservative floor for the development candidate. The plugin
+# also needs the provider-neutral Task.Update priority/labels/workflow-step
+# contract in kdlbs/kandev#2872, which is not released yet. Before publishing,
+# replace this with the first upstream release that actually contains that
+# contract and replace the workflow candidate SHA with the same release tag.
+min_kandev_version: "0.91.0"
 
 runtime:
   type: binary
