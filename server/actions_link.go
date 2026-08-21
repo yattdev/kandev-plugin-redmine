@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,21 +39,37 @@ type linkSetRequest struct {
 
 // issueReferencePattern extracts a trailing numeric issue ID from a
 // Redmine issue URL (".../issues/123") or a "#123" shorthand.
-var issueReferencePattern = regexp.MustCompile(`(\d+)\s*$`)
+var issueReferencePattern = regexp.MustCompile(`^#?([1-9][0-9]*)$`)
 
-func parseIssueReference(reference string) (int, error) {
+func parseIssueReference(reference, baseURL string) (int, error) {
 	trimmed := strings.TrimSpace(reference)
-	trimmed = strings.TrimPrefix(trimmed, "#")
-	trimmed = strings.TrimRight(trimmed, "/")
 	match := issueReferencePattern.FindStringSubmatch(trimmed)
-	if match == nil {
+	if match != nil {
+		return parsePositiveIssueID(match[1], reference)
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || !u.IsAbs() {
 		return 0, fmt.Errorf("redmine: %q does not look like a Redmine issue ID or URL", reference)
 	}
-	id, err := strconv.Atoi(match[1])
-	if err != nil {
-		return 0, fmt.Errorf("redmine: parsing issue id from %q: %w", reference, err)
+	base, err := url.Parse(baseURL)
+	if err != nil || u.Scheme != base.Scheme || u.Host != base.Host {
+		return 0, fmt.Errorf("redmine: issue URL must use configured Redmine origin")
 	}
-	return id, nil
+	prefix := strings.TrimRight(base.EscapedPath(), "/") + "/issues/"
+	path := strings.TrimRight(u.EscapedPath(), "/")
+	id := strings.TrimPrefix(path, prefix)
+	if !strings.HasPrefix(path, prefix) || strings.Contains(id, "/") {
+		return 0, fmt.Errorf("redmine: issue URL must use configured Redmine base path")
+	}
+	return parsePositiveIssueID(id, reference)
+}
+
+func parsePositiveIssueID(raw, reference string) (int, error) {
+	id, err := strconv.ParseInt(raw, 10, 0)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("redmine: parsing issue id from %q", reference)
+	}
+	return int(id), nil
 }
 
 func (p *redminePlugin) handleLinkSet(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
@@ -60,12 +77,11 @@ func (p *redminePlugin) handleLinkSet(ctx context.Context, req *pluginsdk.Plugin
 	if err != nil {
 		return nil, err
 	}
-	issueID, err := parseIssueReference(body.Reference)
+	client, err := p.connectionSvc.Client(ctx, req.Context.WorkspaceID)
 	if err != nil {
 		return classifiedErrorResponse(err)
 	}
-
-	client, err := p.connectionSvc.Client(ctx, req.Context.WorkspaceID)
+	issueID, err := parseIssueReference(body.Reference, client.BaseURL())
 	if err != nil {
 		return classifiedErrorResponse(err)
 	}
