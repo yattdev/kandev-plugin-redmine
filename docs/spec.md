@@ -66,9 +66,9 @@ workspace's state.
 | Link, unlink, and native link surface | `link.*`; UI registration | task action and `openTaskLinkDialog` | `internal/tasklink/tasklink_test.go`, `server/actions_test.go`, `server/plugin_test.go` |
 | Closed-status inbound sync, cursor, title/description option, echo suppression | sync poller | task read/write RPCs | `internal/sync/sync_test.go` |
 | Automatic and manual status write-back | `OnEvent`; `link.set_status` | `task.moved` event; task action context | `server/plugin_test.go`, `internal/sync/sync_test.go` |
-| Watch filters, deduplication, throttling, cleanup | `watches.*` and poller | state RPCs; `PluginOwnedTaskTrees` | `internal/watch/watch_test.go`, `server/actions_watch.go` |
+| Watch filters, deduplication, throttling, cleanup | `watches.*` and poller | state RPCs; namespaced task metadata; `PluginOwnedTaskTrees` | `internal/watch/watch_test.go`, `server/actions_test.go`, `ui/e2e/live-redmine.spec.ts` |
 | Composer references and submit-time authorization | reference searcher/authorizer | `reference_sources` SDK contract | `server/references_test.go` |
-| Packaged native UI registration and lifecycle | `ui/bundle.js`, manifest | integration settings/action registration | host packaged-plugin E2E: `apps/web/e2e/tests/plugins/redmine-packaged-plugin.spec.ts` |
+| Packaged native UI registration and lifecycle | `ui/bundle.js`, manifest | integration settings/action registration | plugin-owned `ui/e2e/packaged-plugin.spec.ts`, `ui/e2e/live-redmine.spec.ts` |
 
 ## Integration gate
 

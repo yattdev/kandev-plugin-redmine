@@ -46,6 +46,17 @@ jobs:
           go-version-file: plugin/go.mod
           cache-dependency-path: plugin/go.sum
 
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plugin/package-lock.json
+
+      - name: Install UI test dependencies
+        working-directory: plugin
+        run: npm ci --include=dev
+
       - name: Check module files are tidy
         working-directory: plugin
         run: |
@@ -63,7 +74,7 @@ jobs:
 
       - name: Test
         working-directory: plugin
-        run: make test
+        run: make test test-ui
 
   candidate-contract:
     name: Server on candidate Kandev task-update contract

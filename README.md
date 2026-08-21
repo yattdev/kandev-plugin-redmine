@@ -150,7 +150,18 @@ serves it directly. Edit the file and repackage — nothing else to run.
 make build               # go build -o bin/... ./server/...
 make test                # go test ./... -race
 make vet                 # go vet ./...
+make test-ui             # native settings/task-action UI contract tests
 make verify-package-host # validate a host-only tarball and checksums
+
+# Packaged UI smoke test against a disposable Kandev host:
+KANDEV_PLUGIN_E2E_URL=http://127.0.0.1:13081 make e2e
+
+# Full live-Redmine acceptance run (API keys are write-only environment input):
+KANDEV_PLUGIN_E2E_URL=http://127.0.0.1:13081 \
+KANDEV_REDMINE_E2E_BASE_URL=http://127.0.0.1:13080 \
+KANDEV_REDMINE_E2E_API_KEY='<first disposable key>' \
+KANDEV_REDMINE_E2E_ROTATED_API_KEY='<second disposable key>' \
+make e2e-live
 ```
 
 > Note: bare `go build ./server/...` (no `-o`) fails with `build output
@@ -169,10 +180,11 @@ make package-host   # host platform only — faster local iteration
 make verify-package # build + validate the five-platform archive
 ```
 
-Both stage `manifest.yaml` + `ui/` alongside the freshly built
+Both stage `manifest.yaml` + the production `ui/bundle.js` alongside the freshly built
 `server/plugin-<goos>-<goarch>[.exe]` binaries, then pack the tree with
 kandev's `cmd/plugin-pack`, which computes `checksums.txt` and writes the
-tarball.
+tarball. UI tests and Playwright sources are deliberately excluded from the
+runtime archive.
 
 Note the Makefile runs `plugin-pack` with `cd $(KANDEV_SDK) && go run
 ./cmd/plugin-pack`, from inside the sibling kandev checkout, rather than as

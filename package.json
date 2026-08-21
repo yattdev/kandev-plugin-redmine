@@ -1,5 +1,13 @@
 {
   "name": "kandev-plugin-redmine-ui-contracts",
   "private": true,
-  "scripts": { "test:ui-contract": "node --test ui/bundle.contract.test.mjs" }
+  "type": "module",
+  "scripts": {
+    "test:ui-contract": "node --test ui/bundle.contract.test.mjs",
+    "e2e": "playwright test --config playwright.config.ts",
+    "e2e:live": "playwright test --config playwright.live.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
 }

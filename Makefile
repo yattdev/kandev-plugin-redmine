@@ -1,4 +1,4 @@
-.PHONY: build run test test-backend fmt vet package package-host verify-package verify-package-host clean
+.PHONY: build run test test-backend test-ui e2e e2e-live fmt vet package package-host verify-package verify-package-host clean
 
 # When you rename the plugin, update BIN and VERSION to match manifest.yaml's
 # id and version (PKG_OUT is derived from them).
@@ -38,6 +38,15 @@ test: test-backend
 test-backend:
 	go test ./... -race
 
+test-ui:
+	npm run test:ui-contract
+
+e2e: verify-package-host
+	npm run e2e
+
+e2e-live: verify-package-host
+	npm run e2e:live
+
 fmt:
 	gofmt -l .
 
@@ -53,7 +62,8 @@ package:
 	rm -rf $(STAGE)
 	mkdir -p $(STAGE)/server
 	cp manifest.yaml $(STAGE)/manifest.yaml
-	cp -r ui $(STAGE)/ui
+	mkdir -p $(STAGE)/ui
+	cp ui/bundle.js $(STAGE)/ui/bundle.js
 	GOOS=linux   GOARCH=amd64 go build -o $(STAGE)/server/plugin-linux-amd64       ./server
 	GOOS=linux   GOARCH=arm64 go build -o $(STAGE)/server/plugin-linux-arm64       ./server
 	GOOS=darwin  GOARCH=amd64 go build -o $(STAGE)/server/plugin-darwin-amd64      ./server
@@ -69,7 +79,8 @@ package-host:
 	rm -rf $(STAGE)
 	mkdir -p $(STAGE)/server
 	cp manifest.yaml $(STAGE)/manifest.yaml
-	cp -r ui $(STAGE)/ui
+	mkdir -p $(STAGE)/ui
+	cp ui/bundle.js $(STAGE)/ui/bundle.js
 	go build -o $(STAGE)/server/plugin-$$(go env GOOS)-$$(go env GOARCH)$$(go env GOEXE) ./server
 	cd $(KANDEV_SDK) && go run ./cmd/plugin-pack -dir $(CURDIR)/$(STAGE) -out $(CURDIR)/$(PKG_OUT) -platform-only
 	rm -rf $(STAGE)
@@ -92,6 +103,8 @@ verify-package: package
 		done; \
 		test ! -e "$$tmp/recipes"; \
 		test ! -e "$$tmp/package.json"; \
+		test ! -e "$$tmp/ui/e2e"; \
+		test ! -e "$$tmp/ui/bundle.contract.test.mjs"; \
 		if command -v sha256sum >/dev/null 2>&1; then \
 			(cd "$$tmp" && sha256sum -c checksums.txt); \
 		else \
@@ -109,6 +122,8 @@ verify-package-host: package-host
 		test -f "$$tmp/server/$$host_executable"; \
 		test ! -e "$$tmp/recipes"; \
 		test ! -e "$$tmp/package.json"; \
+		test ! -e "$$tmp/ui/e2e"; \
+		test ! -e "$$tmp/ui/bundle.contract.test.mjs"; \
 		if command -v sha256sum >/dev/null 2>&1; then \
 			(cd "$$tmp" && sha256sum -c checksums.txt); \
 		else \

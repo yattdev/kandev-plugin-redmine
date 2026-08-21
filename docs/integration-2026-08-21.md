@@ -1,57 +1,74 @@
 # Disposable integration run — 2026-08-21
 
-This is a task-owned, non-production verification run. It is evidence for the
-packaged-plugin installation and connection paths; it is not author acceptance
-and does not replace the scenario coverage required by [the canonical
-specification](spec.md).
+This is a task-owned, non-production verification run for the corrected
+v0.2.0 candidate. It is automated evidence, not author acceptance.
 
 ## Environment
 
-- Plugin checkout: commit `94c7f69`; package
-  `kandev-plugin-redmine-0.1.0.tar.gz`, built with `make verify-package-host`.
-- Kandev host: local compatible source checkout at `b0feb95dd`, launched with
-  `go run ./cmd/kandev __backend --port 13001`.
-- Kandev state: `/tmp/redmine-kandev-home`; all data is disposable.
-- Redmine: official `redmine:6.0` Docker image, no volume, published as
-  `0.0.0.0:13000` and reachable at `http://192.168.50.131:13000`.
-- Two Kandev workspaces were created solely for this run.
+- Plugin: `yattdev/kandev-plugin-redmine`, candidate branch
+  `feature/complete-redmine-plu-9ux`, package
+  `kandev-plugin-redmine-0.2.0.tar.gz`.
+- Kandev: provider-neutral candidate commit
+  `dcfe7c400719f0fc287b4e79e4b08ecb7afe717c`, isolated SQLite database,
+  listening on `0.0.0.0:13081`.
+- Redmine: official Redmine 6.0.10 container
+  `redmine-it-7ca86e53`, isolated storage, REST API enabled, listening on
+  `0.0.0.0:13080`.
+- Data: one selected project, more than 100 issues (including closed issues),
+  live statuses/trackers/priorities, a custom field, and two disposable admin
+  API keys used to exercise credential rotation.
+- Workspace isolation: the default workspace plus a second workspace created
+  and deleted by the acceptance run.
+
+No API key is recorded in this document, screenshots, test output, plugin
+state, task metadata, or action responses.
 
 ## Results
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| Package validation | PASS | `make verify-package-host` generated an archive with validated manifest, executable, UI bundle, and checksums. |
-| Plugin installation and spawn | PASS | `POST /api/plugins/install` accepted the archive; `GET /api/plugins` reported `status: active`, zero restarts, all manifest actions, reference source, and UI registration. |
-| Disable/re-enable | PASS | `POST /api/plugins/kandev-plugin-redmine/disable`, then `/enable`, returned an active plugin. |
-| Workspace action routing | PASS | `connection.get` returned `{"state":"disconnected"}` independently for both test workspaces. |
-| Redmine REST-disabled classification | PASS | A live `connection.save` returned the plugin-owned `api_disabled` classification and the workspace remained disconnected. |
-| Valid live connection | PASS | After enabling Redmine's REST API and provisioning a disposable admin API token, `connection.save` returned `connected` and `last_ok`. The API key was not returned. |
-| Cross-workspace isolation | PASS | The connected workspace returned its base URL and health timestamp; the second workspace remained `disconnected`. |
+| Go behavior and race safety | PASS | `go test ./... -race` across connection, client, issues, mappings, links, sync, watches, and server actions. |
+| Static and UI contracts | PASS | `go vet ./...`; `npm run test:ui-contract` (7/7). |
+| Five-platform package | PASS | `make verify-package`; manifest, five executables, UI bundle, and checksums verified; test sources excluded from the runtime archive. |
+| Packaged native UI | PASS | `npm run e2e`; real tarball installed into disposable Kandev and unconfigured settings UI rendered safely. |
+| Connection and rotation | PASS | Two valid API keys saved sequentially; both validated live; neither appeared in a response; the second workspace remained disconnected. |
+| Projects and live mappings | PASS | Visible projects loaded and selected; statuses, trackers, priorities, and custom-field evidence loaded from Redmine; status/tracker/priority mappings persisted. |
+| Issue write and attachment | PASS | Binary upload returned token+filename+content type; issue create/update succeeded; Redmine returned the attached filename. |
+| Durable link and manual write-back | PASS | Task linked by `#issue`; link re-read; manual status push succeeded; unlink succeeded. |
+| Closed-status inbound sync | PASS | A linked issue moved to a live `is_closed` Redmine status; the inclusive `status_id=*` poll moved the task to the mapped workflow step and updated its title. |
+| Restart/cursor recovery | PASS | Plugin disable/re-enable retained connection, mapping, link, options, and cursor; a subsequent Redmine update synchronized after restart. |
+| Automatic write-back and echo suppression | PASS | Moving the Kandev task wrote the mapped status to Redmine; after another overlap poll the task remained in the originating step. |
+| Watcher lifecycle | PASS | Immediate and background-capable watch polling created one linked task, a second poll deduplicated it, `maxInflightTasks: 1` held, and watch deletion cascade-deleted the owned task. |
+| Screenshots | PASS | `docs/screenshots/` contains the connected/redacted settings page plus project, mapping, and watcher cards captured by the live Playwright run. |
 
-## Commands
+Composer submit-time authorization, retry/backoff timing, non-admin custom-field
+fallback, redirect stripping, rollback/compensation branches, and background
+loop shutdown are covered by focused Go tests because reproducing those fault
+conditions through a browser would be slower and less deterministic than the
+real boundary tests.
+
+## Repeatable commands
+
+From the plugin checkout with the Kandev checkout available at the `go.mod`
+sibling path:
 
 ```sh
-GOWORK=/tmp/redmine-plugin-go.work \
-  KANDEV_SDK=/path/to/kandev/apps/backend make verify-package-host
+npm ci --include=dev
+go test ./... -race
+go vet ./...
+npm run test:ui-contract
+make verify-package
 
-KANDEV_HOME_DIR=/tmp/redmine-kandev-home \
-  KANDEV_DATABASE_PATH=/tmp/redmine-kandev-home/data/kandev.db \
-  go run ./cmd/kandev __backend --port 13001
+KANDEV_PLUGIN_E2E_URL=http://127.0.0.1:13081 \
+  npm run e2e
 
-docker run -d --rm --name redmine-plugin-integration -p 13000:3000 redmine:6.0
-curl -F package=@kandev-plugin-redmine-0.1.0.tar.gz \
-  http://127.0.0.1:13001/api/plugins/install
+KANDEV_PLUGIN_E2E_URL=http://127.0.0.1:13081 \
+KANDEV_REDMINE_E2E_BASE_URL=http://127.0.0.1:13080 \
+KANDEV_REDMINE_E2E_API_KEY='<first disposable key>' \
+KANDEV_REDMINE_E2E_ROTATED_API_KEY='<second disposable key>' \
+  npm run e2e:live
 ```
 
-The run intentionally does not record the disposable API token. Destroy the
-container and `/tmp/redmine-kandev-home` after review; neither contains
-production data.
-
-## Still required before a corrected release
-
-Exercise issue creation and attachment upload, project and field mappings,
-task link/unlink, inbound closed-status sync, cursor restart, title/description
-sync, manual and automatic write-back with echo suppression, watcher
-deduplication/throttling, composer authorization, outage/reconnect, and
-connection/watch cleanup. Then obtain the author's explicit acceptance test
-before publishing a non-preview release.
+The candidate Kandev and Redmine services remain available for the author's
+final acceptance test. No tag or corrected release is published before that
+explicit acceptance.
