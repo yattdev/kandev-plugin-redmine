@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 )
 
 // BaseURL returns the configured instance base URL, for callers that need to
@@ -18,6 +19,16 @@ func (c *Client) BaseURL() string { return c.baseURL }
 // decoding the JSON response into out.
 func (c *Client) GetJSON(ctx context.Context, path string, query map[string]string, out any) error {
 	req, err := c.newRequest(ctx, http.MethodGet, path, query)
+	if err != nil {
+		return err
+	}
+	return c.do(req, out)
+}
+
+// GetJSONValues is GetJSON with support for repeated query keys. Redmine's
+// issue-list endpoint uses this form for its native advanced filters.
+func (c *Client) GetJSONValues(ctx context.Context, path string, query url.Values, out any) error {
+	req, err := c.newRequestValues(ctx, http.MethodGet, path, query)
 	if err != nil {
 		return err
 	}

@@ -56,10 +56,21 @@ type Watch struct {
 	// live choices selected in the settings UI and are sent as cf_<id> query
 	// filters to Redmine.
 	CustomFieldFilters map[int]string
-	TrackerLabels      map[int]string
-	PriorityMappings   map[int]string
-	MaxInflightTasks   int // 0 = unlimited
-	Enabled            bool
+	// Filters carries Redmine-native advanced predicates selected through the
+	// dynamic "Add filter" UI. The older typed fields above remain for
+	// backwards-compatible saved watches.
+	Filters          []Filter
+	TrackerLabels    map[int]string
+	PriorityMappings map[int]string
+	MaxInflightTasks int // 0 = unlimited
+	Enabled          bool
+}
+
+// Filter is a validated Redmine issue-list predicate.
+type Filter struct {
+	Field    string
+	Operator string
+	Value    string
 }
 
 func (w Watch) matches(issue issues.Issue) bool {
@@ -257,7 +268,7 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 	}
 
 	for offset := 0; ; {
-		result, err := issuesSvc.ListIssues(ctx, issues.ListIssuesParams{ProjectID: strconv.Itoa(w.ProjectID), Filters: w.redmineFilters(), Offset: offset, Limit: 100})
+		result, err := issuesSvc.ListIssues(ctx, issues.ListIssuesParams{ProjectID: strconv.Itoa(w.ProjectID), Filters: w.redmineFilters(), NativeFilters: w.nativeFilters(), Offset: offset, Limit: 100})
 		if err != nil {
 			return err
 		}
@@ -366,6 +377,14 @@ func (w Watch) redmineFilters() map[string]string {
 		if id > 0 && value != "" {
 			filters["cf_"+strconv.Itoa(id)] = value
 		}
+	}
+	return filters
+}
+
+func (w Watch) nativeFilters() []issues.NativeFilter {
+	filters := make([]issues.NativeFilter, 0, len(w.Filters))
+	for _, filter := range w.Filters {
+		filters = append(filters, issues.NativeFilter{Field: filter.Field, Operator: filter.Operator, Value: filter.Value})
 	}
 	return filters
 }
@@ -589,6 +608,13 @@ func (w Watch) toMap() map[string]any {
 	if len(w.CustomFieldFilters) > 0 {
 		m["custom_field_filters"] = intStringMap(w.CustomFieldFilters)
 	}
+	if len(w.Filters) > 0 {
+		filters := make([]any, 0, len(w.Filters))
+		for _, filter := range w.Filters {
+			filters = append(filters, map[string]any{"field": filter.Field, "operator": filter.Operator, "value": filter.Value})
+		}
+		m["filters"] = filters
+	}
 	if len(w.TrackerLabels) > 0 {
 		m["tracker_labels"] = intStringMap(w.TrackerLabels)
 	}
@@ -617,6 +643,20 @@ func watchFromMap(workspaceID string, m map[string]any) Watch {
 	}
 	if v, ok := m["enabled"].(bool); ok {
 		w.Enabled = v
+	}
+	if raw, ok := m["filters"].([]any); ok {
+		for _, item := range raw {
+			filterMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			field, _ := filterMap["field"].(string)
+			operator, _ := filterMap["operator"].(string)
+			value, _ := filterMap["value"].(string)
+			if field != "" && operator != "" && value != "" {
+				w.Filters = append(w.Filters, Filter{Field: field, Operator: operator, Value: value})
+			}
+		}
 	}
 	if v, ok := m["tracker_id"].(float64); ok {
 		id := int(v)

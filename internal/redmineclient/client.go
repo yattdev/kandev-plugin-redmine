@@ -102,6 +102,16 @@ func (e *APIError) Error() string { return e.Message }
 // newRequest builds an authenticated GET request against path (which must
 // start with "/"), with query parameters merged in.
 func (c *Client) newRequest(ctx context.Context, method, path string, query map[string]string) (*http.Request, error) {
+	values := make(url.Values, len(query))
+	for key, value := range query {
+		values.Set(key, value)
+	}
+	return c.newRequestValues(ctx, method, path, values)
+}
+
+// newRequestValues is the multi-value counterpart used for Redmine's native
+// issue-filter syntax (f[]=..., op[field]=..., v[field][] = ...).
+func (c *Client) newRequestValues(ctx context.Context, method, path string, query url.Values) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("redmineclient: building request: %w", err)
@@ -110,8 +120,11 @@ func (c *Client) newRequest(ctx context.Context, method, path string, query map[
 	req.Header.Set("Accept", "application/json")
 
 	q := req.URL.Query()
-	for k, v := range query {
-		q.Set(k, v)
+	for key, values := range query {
+		q.Del(key)
+		for _, value := range values {
+			q.Add(key, value)
+		}
 	}
 	req.URL.RawQuery = q.Encode()
 	return req, nil

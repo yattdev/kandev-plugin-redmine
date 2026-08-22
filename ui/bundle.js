@@ -808,15 +808,12 @@ function makeSettingsComponent(host) {
     const [projects, setProjects] = React.useState([]);
     const [trackers, setTrackers] = React.useState([]);
     const [statuses, setStatuses] = React.useState([]);
-    const [filterOptions, setFilterOptions] = React.useState({ priorities: [], assignees: [], categories: [], custom_field_values: {}, custom_fields: [] });
+    const [filterOptions, setFilterOptions] = React.useState({ filters: [] });
     const [newProjectId, setNewProjectId] = React.useState("");
     const [newTrackerId, setNewTrackerId] = React.useState("");
     const [newStatusId, setNewStatusId] = React.useState("");
-    const [newPriorityId, setNewPriorityId] = React.useState("");
-    const [newAssigneeId, setNewAssigneeId] = React.useState("");
-    const [newCategoryId, setNewCategoryId] = React.useState("");
-    const [customFilters, setCustomFilters] = React.useState({});
-    const [customFieldToAdd, setCustomFieldToAdd] = React.useState("");
+    const [activeFilters, setActiveFilters] = React.useState([]);
+    const [filterToAdd, setFilterToAdd] = React.useState("");
     const [refreshingFilters, setRefreshingFilters] = React.useState(false);
     const [newMaxInflight, setNewMaxInflight] = React.useState("");
     const [creating, setCreating] = React.useState(false);
@@ -854,7 +851,7 @@ function makeSettingsComponent(host) {
       setRefreshingFilters(true);
       try {
         const options = await invoke("watches.filter_options", workspaceId, { project_id: id });
-        setFilterOptions(options || { priorities: [], assignees: [], categories: [], custom_field_values: {}, custom_fields: [] });
+        setFilterOptions(options || { filters: [] });
       } catch (err) {
         toast.error(errorMessage(err));
       } finally { setRefreshingFilters(false); }
@@ -863,8 +860,8 @@ function makeSettingsComponent(host) {
     const selectProject = (value) => {
       const projectID = value === "__select_project__" ? "" : value;
       setNewProjectId(projectID);
-      setNewTrackerId(""); setNewStatusId(""); setNewPriorityId(""); setNewAssigneeId(""); setNewCategoryId(""); setCustomFilters({}); setCustomFieldToAdd("");
-      setFilterOptions({ priorities: [], assignees: [], categories: [], custom_field_values: {}, custom_fields: [] });
+      setNewTrackerId(""); setNewStatusId(""); setActiveFilters([]); setFilterToAdd("");
+      setFilterOptions({ filters: [] });
       if (projectID) void refreshFilterOptions(projectID);
     };
 
@@ -888,12 +885,7 @@ function makeSettingsComponent(host) {
         toast.error("Select a valid status.");
         return;
       }
-      const priorityId = newPriorityId === "" ? null : Number(newPriorityId);
-      const assigneeId = newAssigneeId === "" ? null : Number(newAssigneeId);
-      const categoryId = newCategoryId === "" ? null : Number(newCategoryId);
-      for (const [label, value] of [["priority", priorityId], ["assignee", assigneeId], ["category", categoryId]]) {
-        if (value !== null && (!Number.isSafeInteger(value) || value <= 0)) { toast.error(`Select a valid ${label}.`); return; }
-      }
+      if (activeFilters.some((filter) => !filter.value)) { toast.error("Choose a value for every added filter."); return; }
       const maxInflight = Number(newMaxInflight);
       if (newMaxInflight !== "" && (!Number.isSafeInteger(maxInflight) || maxInflight < 0)) {
         toast.error("Max inflight tasks must be a non-negative integer.");
@@ -905,17 +897,14 @@ function makeSettingsComponent(host) {
           project_id: projectId,
           tracker_id: trackerId,
           status_id: statusId,
-          priority_id: priorityId,
-          assignee_id: assigneeId,
-          category_id: categoryId,
-          custom_field_filters: customFilters,
+          filters: activeFilters,
           max_inflight_tasks: newMaxInflight === "" ? 0 : maxInflight,
           enabled: true,
         });
         setNewProjectId("");
         setNewTrackerId("");
         setNewStatusId("");
-        setNewPriorityId(""); setNewAssigneeId(""); setNewCategoryId(""); setCustomFilters({}); setCustomFieldToAdd("");
+        setActiveFilters([]); setFilterToAdd("");
         setNewMaxInflight("");
         toast.success("Watch created.");
         await load();
@@ -992,29 +981,13 @@ function makeSettingsComponent(host) {
             ),
         h(
           "div",
-          { className: "grid gap-3 sm:grid-cols-2 lg:grid-cols-[1.2fr_1fr_1fr_1fr_auto] lg:items-end" },
+          { className: "grid gap-3 sm:grid-cols-2 lg:grid-cols-[1.2fr_1fr_auto] lg:items-end" },
           h(
             "div", { className: "space-y-2" },
             h(Label, { htmlFor: "redmine-new-watch-project" }, "Project"),
             h(Select, { value: newProjectId || "__select_project__", onValueChange: selectProject },
               h(SelectTrigger, { id: "redmine-new-watch-project", "data-testid": "redmine-watch-project", className: "w-full" }, h(SelectValue, { placeholder: "Select project" })),
               h(SelectContent, null, [h(SelectItem, { key: "__select_project__", value: "__select_project__" }, "Select project")].concat(projects.map((project) => h(SelectItem, { key: project.id, value: String(project.id) }, project.name)))),
-            ),
-          ),
-          h(
-            "div", { className: "space-y-2" },
-            h(Label, { htmlFor: "redmine-new-watch-tracker" }, "Tracker (optional)"),
-            h(Select, { value: newTrackerId || "__any_tracker__", onValueChange: (value) => setNewTrackerId(value === "__any_tracker__" ? "" : value) },
-              h(SelectTrigger, { id: "redmine-new-watch-tracker", "data-testid": "redmine-watch-tracker", className: "w-full" }, h(SelectValue, null)),
-              h(SelectContent, null, [h(SelectItem, { key: "__any_tracker__", value: "__any_tracker__" }, "Any tracker")].concat(trackers.map((tracker) => h(SelectItem, { key: tracker.id, value: String(tracker.id) }, tracker.name)))),
-            ),
-          ),
-          h(
-            "div", { className: "space-y-2" },
-            h(Label, { htmlFor: "redmine-new-watch-status" }, "Status (optional)"),
-            h(Select, { value: newStatusId || "__any_status__", onValueChange: (value) => setNewStatusId(value === "__any_status__" ? "" : value) },
-              h(SelectTrigger, { id: "redmine-new-watch-status", "data-testid": "redmine-watch-status", className: "w-full" }, h(SelectValue, null)),
-              h(SelectContent, null, [h(SelectItem, { key: "__any_status__", value: "__any_status__" }, "Any status")].concat(statuses.map((status) => h(SelectItem, { key: status.id, value: String(status.id) }, status.name)))),
             ),
           ),
           h(
@@ -1035,40 +1008,29 @@ function makeSettingsComponent(host) {
         ),
         newProjectId ? h(
           "div", { className: "space-y-3 rounded-md border p-3", "data-testid": "redmine-watch-filters" },
-          h("div", { className: "flex items-center justify-between gap-2" }, h("div", null, h("h4", { className: "font-medium" }, "Dynamic Redmine filters"), h("p", { className: "text-muted-foreground text-sm" }, "Live options are scoped to the selected project.")), h(Button, { type: "button", variant: "outline", size: "sm", "data-testid": "redmine-watch-filters-refresh", disabled: refreshingFilters, onClick: () => { void refreshFilterOptions(); } }, refreshingFilters ? "Refreshing…" : "Refresh")),
-          h("div", { className: "grid gap-3 sm:grid-cols-3" },
-            h("div", { className: "space-y-2" }, h(Label, null, "Priority"), h(Select, { value: newPriorityId || "__any_priority__", onValueChange: (value) => setNewPriorityId(value === "__any_priority__" ? "" : value) }, h(SelectTrigger, { "data-testid": "redmine-watch-priority" }, h(SelectValue, null)), h(SelectContent, null, [h(SelectItem, { key: "__any_priority__", value: "__any_priority__" }, "Any priority")].concat((filterOptions.priorities || []).map((item) => h(SelectItem, { key: item.id, value: String(item.id) }, item.name)))))),
-            h("div", { className: "space-y-2" }, h(Label, null, "Assigned to"), h(Select, { value: newAssigneeId || "__any_assignee__", onValueChange: (value) => setNewAssigneeId(value === "__any_assignee__" ? "" : value) }, h(SelectTrigger, { "data-testid": "redmine-watch-assignee" }, h(SelectValue, null)), h(SelectContent, null, [h(SelectItem, { key: "__any_assignee__", value: "__any_assignee__" }, "Any assignee")].concat((filterOptions.assignees || []).map((item) => h(SelectItem, { key: item.id, value: String(item.id) }, item.name)))))),
-            h("div", { className: "space-y-2" }, h(Label, null, "Category"), h(Select, { value: newCategoryId || "__any_category__", onValueChange: (value) => setNewCategoryId(value === "__any_category__" ? "" : value) }, h(SelectTrigger, { "data-testid": "redmine-watch-category" }, h(SelectValue, null)), h(SelectContent, null, [h(SelectItem, { key: "__any_category__", value: "__any_category__" }, "Any category")].concat((filterOptions.categories || []).map((item) => h(SelectItem, { key: item.id, value: String(item.id) }, item.name)))))),
-          ),
-          h(
-            "div", { className: "space-y-2" }, h(Label, null, "Add custom-field filter"),
-            h(
-              Select,
-              { value: customFieldToAdd || "__select_custom_field__", onValueChange: (value) => { if (value !== "__select_custom_field__") setCustomFieldToAdd(value); } },
-              h(SelectTrigger, { "data-testid": "redmine-watch-custom-field-add" }, h(SelectValue, { placeholder: "Select custom field" })),
-              h(
-                SelectContent, null,
-                [h(SelectItem, { key: "__select_custom_field__", value: "__select_custom_field__" }, "Select custom field")].concat(
-                  (filterOptions.custom_fields || []).filter((field) => !(String(field.id) in customFilters)).map((field) => h(SelectItem, { key: field.id, value: String(field.id) }, field.name || `Custom field #${field.id}`)),
-                ),
-              ),
+          h("div", { className: "flex items-center justify-between gap-2" }, h("div", null, h("h4", { className: "font-medium" }, "Redmine filters"), h("p", { className: "text-muted-foreground text-sm" }, "Add the live Redmine fields you want to match. Choices are scoped to this project.")), h(Button, { type: "button", variant: "outline", size: "sm", "data-testid": "redmine-watch-filters-refresh", disabled: refreshingFilters, onClick: () => { void refreshFilterOptions(); } }, refreshingFilters ? "Refreshing…" : "Refresh")),
+          h("div", { className: "max-w-md space-y-2" },
+            h(Label, { htmlFor: "redmine-watch-filter-add" }, "Add filter"),
+            h(Select, { value: filterToAdd || "__add_filter__", onValueChange: (value) => { if (value !== "__add_filter__") { const option = (filterOptions.filters || []).find((candidate) => candidate.field === value); if (option) { setActiveFilters(activeFilters.concat({ field: option.field, operator: (option.operators || [])[0]?.value || "=", value: "" })); setFilterToAdd(""); } } } },
+              h(SelectTrigger, { id: "redmine-watch-filter-add", "data-testid": "redmine-watch-filter-add" }, h(SelectValue, { placeholder: "Add Redmine filter" })),
+              h(SelectContent, null, [h(SelectItem, { key: "__add_filter__", value: "__add_filter__" }, "Add Redmine filter")].concat((filterOptions.filters || []).filter((option) => !activeFilters.some((filter) => filter.field === option.field)).map((option) => h(SelectItem, { key: option.field, value: option.field }, option.name)))),
             ),
           ),
-          customFieldToAdd ? h(
-            "div", { className: "flex items-end gap-2" },
-            h(
-              "div", { className: "flex-1 space-y-2" },
-              h(Label, null, `Value for ${(filterOptions.custom_fields || []).find((field) => String(field.id) === customFieldToAdd)?.name || `custom field #${customFieldToAdd}`}`),
-              h(
-                Select,
-                { value: customFilters[customFieldToAdd] || "__select_custom_value__", onValueChange: (value) => { if (value !== "__select_custom_value__") { setCustomFilters({ ...customFilters, [customFieldToAdd]: value }); setCustomFieldToAdd(""); } } },
-                h(SelectTrigger, { "data-testid": "redmine-watch-custom-field-value" }, h(SelectValue, null)),
-                h(SelectContent, null, [h(SelectItem, { key: "__select_custom_value__", value: "__select_custom_value__" }, "Select value")].concat((filterOptions.custom_field_values[customFieldToAdd] || []).map((value) => h(SelectItem, { key: value, value }, value)))),
-              ),
-            ),
-          ) : null,
-          Object.entries(customFilters).map(([id, value]) => { const field = (filterOptions.custom_fields || []).find((candidate) => String(candidate.id) === id); return h("div", { key: id, className: "flex items-center justify-between text-sm", "data-testid": `redmine-watch-custom-filter-${id}` }, h("span", null, `${field?.name || `Custom field #${id}`}: ${value}`), h(Button, { type: "button", variant: "ghost", size: "sm", onClick: () => { const next = { ...customFilters }; delete next[id]; setCustomFilters(next); } }, "Remove")); }),
+          activeFilters.map((filter) => {
+            const option = (filterOptions.filters || []).find((candidate) => candidate.field === filter.field);
+            if (!option) return null;
+            const change = (changes) => setActiveFilters(activeFilters.map((candidate) => candidate.field === filter.field ? { ...candidate, ...changes } : candidate));
+            const remove = () => setActiveFilters(activeFilters.filter((candidate) => candidate.field !== filter.field));
+            const valueControl = option.kind === "select"
+              ? h(Select, { value: filter.value || "__filter_value__", onValueChange: (value) => change({ value: value === "__filter_value__" ? "" : value }) }, h(SelectTrigger, { "data-testid": `redmine-watch-filter-value-${filter.field}` }, h(SelectValue, { placeholder: "Select value" })), h(SelectContent, null, [h(SelectItem, { key: "__filter_value__", value: "__filter_value__" }, "Select value")].concat((option.values || []).map((value) => h(SelectItem, { key: value.value, value: value.value }, value.name)))))
+              : h(Input, { "data-testid": `redmine-watch-filter-value-${filter.field}`, type: option.kind === "date" ? "date" : option.kind === "number" ? "number" : "text", value: filter.value, placeholder: `Enter ${option.name.toLowerCase()}`, onChange: (event) => change({ value: event.target.value }) });
+            return h("div", { key: filter.field, className: "grid gap-2 rounded border p-2 sm:grid-cols-4 sm:items-end", "data-testid": `redmine-watch-filter-${filter.field}` },
+              h("div", null, h(Label, null, "Filter"), h("p", { className: "pt-2 text-sm" }, option.name)),
+              h("div", { className: "space-y-1" }, h(Label, null, "Operator"), h(Select, { value: filter.operator, onValueChange: (value) => change({ operator: value }) }, h(SelectTrigger, { "data-testid": `redmine-watch-filter-operator-${filter.field}` }, h(SelectValue, null)), h(SelectContent, null, (option.operators || []).map((operator) => h(SelectItem, { key: operator.value, value: operator.value }, operator.name))))),
+              h("div", { className: "space-y-1" }, h(Label, null, "Value"), valueControl),
+              h(Button, { type: "button", variant: "ghost", size: "sm", "data-testid": `redmine-watch-filter-remove-${filter.field}`, onClick: remove }, "Remove"),
+            );
+          }),
         ) : null,
       ),
     );

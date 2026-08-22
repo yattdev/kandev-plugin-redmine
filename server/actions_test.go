@@ -542,6 +542,22 @@ func TestHandleAction_WatchesValidateLiveFiltersAndSelectedProject(t *testing.T)
 	}
 }
 
+func TestValidateNativeWatchFiltersUsesOnlyAdvertisedFieldsValuesAndOperators(t *testing.T) {
+	available := []watchNativeFilterOption{
+		{Field: "status_id", Kind: "select", Operators: operatorsForKind("select"), Values: []watchNativeFilterValue{{Value: "2", Name: "New"}}},
+		{Field: "subject", Kind: "text", Operators: operatorsForKind("text")},
+	}
+	require.NoError(t, validateNativeWatchFilters([]watch.Filter{{Field: "status_id", Operator: "=", Value: "2"}, {Field: "subject", Operator: "~", Value: "incident"}}, available))
+	for _, filters := range [][]watch.Filter{
+		{{Field: "status_id", Operator: "=", Value: "99"}},
+		{{Field: "status_id", Operator: "~", Value: "2"}},
+		{{Field: "unknown", Operator: "=", Value: "1"}},
+		{{Field: "status_id", Operator: "=", Value: "2"}, {Field: "status_id", Operator: "=", Value: "2"}},
+	} {
+		require.Error(t, validateNativeWatchFilters(filters, available))
+	}
+}
+
 func TestHandleAction_WatchesPollCreatesTaskImmediately(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"strconv"
 
 	"kandev-plugin-redmine/internal/redmineclient"
@@ -132,8 +133,19 @@ type ListIssuesParams struct {
 	// populate validated, plugin-owned keys (tracker_id, status_id,
 	// priority_id, assigned_to_id, category_id, and cf_<positive-id>).
 	Filters map[string]string
-	Offset  int
-	Limit   int
+	// NativeFilters uses Redmine's advanced issue-filter grammar, so callers
+	// can offer the same add/remove field model as Redmine's Issues page.
+	NativeFilters []NativeFilter
+	Offset        int
+	Limit         int
+}
+
+// NativeFilter is one Redmine issue-list predicate. Field and operator are
+// server-validated before this package receives them.
+type NativeFilter struct {
+	Field    string
+	Operator string
+	Value    string
 }
 
 type ListIssuesResult struct {
@@ -150,27 +162,36 @@ type issuesListEnvelope struct {
 // Redmine defaults to open-only, which would silently drop closed-issue
 // updates from sync and watcher polling (spec "Issue read/write").
 func (s *Service) ListIssues(ctx context.Context, params ListIssuesParams) (*ListIssuesResult, error) {
-	query := map[string]string{"status_id": "*"}
+	query := url.Values{"status_id": {"*"}}
 	if params.ProjectID != "" {
-		query["project_id"] = params.ProjectID
+		query.Set("project_id", params.ProjectID)
 	}
 	if params.UpdatedOnFrom != "" {
-		query["updated_on"] = params.UpdatedOnFrom
+		query.Set("updated_on", params.UpdatedOnFrom)
 	}
 	for key, value := range params.Filters {
 		if value != "" {
-			query[key] = value
+			query.Set(key, value)
 		}
 	}
 	limit := params.Limit
 	if limit <= 0 {
 		limit = 100
 	}
-	query["offset"] = strconv.Itoa(params.Offset)
-	query["limit"] = strconv.Itoa(limit)
+	for _, filter := range params.NativeFilters {
+		if filter.Field == "" || filter.Operator == "" || filter.Value == "" {
+			continue
+		}
+		query.Set("set_filter", "1")
+		query.Add("f[]", filter.Field)
+		query.Set("op["+filter.Field+"]", filter.Operator)
+		query.Add("v["+filter.Field+"][]", filter.Value)
+	}
+	query.Set("offset", strconv.Itoa(params.Offset))
+	query.Set("limit", strconv.Itoa(limit))
 
 	var out issuesListEnvelope
-	if err := s.client.GetJSON(ctx, "/issues.json", query, &out); err != nil {
+	if err := s.client.GetJSONValues(ctx, "/issues.json", query, &out); err != nil {
 		return nil, err
 	}
 	result := ListIssuesResult{Issues: make([]Issue, len(out.Issues)), TotalCount: out.TotalCount}

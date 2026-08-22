@@ -31,18 +31,22 @@ test("integration registration supplies a branded icon and workspace enable acti
   assert.match(bundle, /"integration.enabled.save"/);
 });
 
-test("watcher filters use Kandev Select controls and nonempty optional sentinels", () => {
+test("watcher filters use a Redmine-style add/remove field picker", () => {
   assert.match(bundle, /redmine-watch-project/);
-  assert.match(bundle, /__any_tracker__/);
-  assert.match(bundle, /__any_status__/);
+  assert.match(bundle, /redmine-watch-filter-add/);
+  assert.match(bundle, /activeFilters/);
+  assert.match(bundle, /Add the live Redmine fields you want to match/);
+  assert.match(bundle, /redmine-watch-filter-operator-/);
+  assert.match(bundle, /redmine-watch-filter-value-/);
+  assert.match(bundle, /redmine-watch-filter-remove-/);
+  assert.match(bundle, /filters: activeFilters/);
   assert.doesNotMatch(bundle, /h\("select", \{ id: "redmine-new-watch-/);
 });
 
 test("watcher configuration loads refreshable live project filters", () => {
-  for (const id of ["redmine-watch-filters", "redmine-watch-filters-refresh", "redmine-watch-priority", "redmine-watch-assignee", "redmine-watch-category", "redmine-watch-custom-field-add"]) assert.match(bundle, new RegExp(id));
+  for (const id of ["redmine-watch-filters", "redmine-watch-filters-refresh", "redmine-watch-filter-add"]) assert.match(bundle, new RegExp(id));
   assert.match(bundle, /watches\.filter_options/);
-  assert.match(bundle, /custom_field_filters: customFilters/);
-  assert.match(bundle, /Live options are scoped to the selected project/);
+  assert.match(bundle, /Choices are scoped to this project/);
 });
 
 test("project selection uses a dropdown with removable selected projects", () => {

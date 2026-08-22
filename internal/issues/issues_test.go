@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -52,6 +53,25 @@ func TestListIssues_SendsValidatedWatchFilters(t *testing.T) {
 	require.Equal(t, "12", query["assigned_to_id"])
 	require.Equal(t, "8", query["category_id"])
 	require.Equal(t, "Gold", query["cf_3"])
+}
+
+func TestListIssues_SendsRedmineNativeAdvancedFilters(t *testing.T) {
+	var query url.Values
+	svc := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		_, _ = w.Write([]byte(`{"issues":[],"total_count":0}`))
+	})
+	_, err := svc.ListIssues(context.Background(), issues.ListIssuesParams{ProjectID: "7", NativeFilters: []issues.NativeFilter{
+		{Field: "status_id", Operator: "=", Value: "2"},
+		{Field: "subject", Operator: "~", Value: "incident"},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, "1", query.Get("set_filter"))
+	require.ElementsMatch(t, []string{"status_id", "subject"}, query["f[]"])
+	require.Equal(t, "=", query.Get("op[status_id]"))
+	require.Equal(t, "~", query.Get("op[subject]"))
+	require.Equal(t, []string{"2"}, query["v[status_id][]"])
+	require.Equal(t, []string{"incident"}, query["v[subject][]"])
 }
 
 func TestListIssues_ClosedIssueIncludedInResults(t *testing.T) {

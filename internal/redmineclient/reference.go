@@ -182,6 +182,26 @@ type issueCategoriesResponse struct {
 	IssueCategories []NamedID `json:"issue_categories"`
 }
 
+type versionsResponse struct {
+	Versions []NamedID `json:"versions"`
+}
+
+// ListProjectVersions returns target-version choices visible in a project.
+func (c *Client) ListProjectVersions(ctx context.Context, projectID int) ([]NamedID, error) {
+	if projectID <= 0 {
+		return nil, fmt.Errorf("redmineclient: project ID must be positive")
+	}
+	req, err := c.newRequest(ctx, http.MethodGet, "/projects/"+strconv.Itoa(projectID)+"/versions.json", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out versionsResponse
+	if err := c.do(req, &out); err != nil {
+		return nil, err
+	}
+	return out.Versions, nil
+}
+
 func (c *Client) ListIssueCategories(ctx context.Context, projectID int) ([]NamedID, error) {
 	if projectID <= 0 {
 		return nil, fmt.Errorf("redmineclient: project ID must be positive")
