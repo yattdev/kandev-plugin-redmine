@@ -1,13 +1,9 @@
 // Package sync owns the cursor-based inbound polling loop and the opt-in
 // outbound write-back, wired to internal/tasklink for echo suppression.
 //
-// Write-back has two entry points that share PushWriteback: the OnEvent
-// "task.moved" handler (server/plugin.go) for near-real-time delivery, and
-// this package's own reconciliation pass over linked tasks (called from the
-// same ticker as PollInbound) as a backstop — OnEvent delivery is
-// best-effort (bounded in-memory queue, lost on backend restart or sustained
-// overload per the plugin host's delivery contract), so a missed event still
-// converges on the next poll instead of leaving the write-back stuck.
+// Write-back is outbound only and is initiated by server/plugin.go's
+// task.moved event handler or the manual status action. PollInbound does not
+// reconcile missed outbound events; it only applies Redmine changes inbound.
 package sync
 
 import (
@@ -21,6 +17,8 @@ import (
 	"kandev-plugin-redmine/internal/tasklink"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // cursorOverlap subtracts one second from the persisted cursor before using
@@ -65,6 +63,16 @@ func (s *Service) GetOptions(ctx context.Context, workspaceID string) (Options, 
 	autoWriteback, _ := value["auto_status_writeback"].(bool)
 	syncTitleDesc, _ := value["sync_title_description"].(bool)
 	return Options{AutoStatusWriteback: autoWriteback, SyncTitleDescription: syncTitleDesc}, nil
+}
+
+func (s *Service) Clear(ctx context.Context, workspaceID string) error {
+	if err := s.host.DeleteState(ctx, stateScope, workspaceID, cursorKey); err != nil {
+		return fmt.Errorf("sync: clearing cursor: %w", err)
+	}
+	if err := s.host.DeleteState(ctx, stateScope, workspaceID, optionsKey); err != nil {
+		return fmt.Errorf("sync: clearing options: %w", err)
+	}
+	return nil
 }
 
 type Service struct {
@@ -138,9 +146,8 @@ func (s *Service) pollProject(ctx context.Context, workspaceID string, issuesSvc
 	}
 }
 
-// applyInbound updates the task linked to issue (if any), skipping any field
-// whose incoming value matches what this plugin itself last pushed
-// (echo suppression).
+// applyInbound updates the task linked to issue, if any. Status echo markers
+// are one-shot; title and description are inbound-only.
 func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue issues.Issue, mapping fieldmapping.Mapping, opts Options) error {
 	taskID, found, err := s.tasklink.TaskIDForIssue(ctx, workspaceID, issue.ID)
 	if err != nil || !found {
@@ -150,48 +157,128 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 	if err != nil || !found {
 		return err
 	}
-
-	update := pluginsdk.UpdateTaskInput{ID: taskID}
-	changed := false
-
-	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok {
-		echo := link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
-		if !echo {
-			update.WorkflowStepID = &stepID
-			changed = true
+	task, err := s.host.Tasks().Get(ctx, taskID)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return s.tasklink.Unset(ctx, taskID)
 		}
+		return fmt.Errorf("sync: reading linked task %s: %w", taskID, err)
 	}
 
+	plan := buildInboundPlan(taskID, *task, *link, issue, mapping, opts)
+	if plan.changed {
+		if _, err := s.host.Tasks().Update(ctx, plan.update); err != nil {
+			if status.Code(err) == codes.NotFound {
+				return s.tasklink.Unset(ctx, taskID)
+			}
+			return fmt.Errorf("sync: applying inbound update to task %s: %w", taskID, err)
+		}
+	}
+	return s.finishInbound(ctx, taskID, plan)
+}
+
+type inboundPlan struct {
+	update               pluginsdk.UpdateTaskInput
+	changed              bool
+	consumeStatusEcho    bool
+	desiredTrackerLabel  string
+	trackerMarkerChanged bool
+}
+
+func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, issue issues.Issue, mapping fieldmapping.Mapping, opts Options) inboundPlan {
+	plan := inboundPlan{update: pluginsdk.UpdateTaskInput{ID: taskID}}
+	plan.consumeStatusEcho = link.LastPushedStatusID != nil
+	statusEcho := link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
+	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok && !statusEcho && task.WorkflowStepID != stepID {
+		plan.update.WorkflowStepID = &stepID
+		plan.changed = true
+	}
 	if opts.SyncTitleDescription {
-		if applyTitleAndDescription(&update, issue, *link) {
-			changed = true
+		plan.changed = applyTitleAndDescriptionInbound(&plan.update, issue, task) || plan.changed
+	}
+	if priority, ok := mapping.TaskPriorityForRedminePriority(issue.PriorityID); ok && task.Priority != priority {
+		plan.update.Priority = &priority
+		plan.changed = true
+	}
+	plan.desiredTrackerLabel, _ = mapping.TaskLabelForTracker(issue.TrackerID)
+	labels := reconcileTrackerLabels(task.Labels, link.AppliedTrackerLabel, plan.desiredTrackerLabel)
+	if !stringSlicesEqual(labels, task.Labels) {
+		plan.update.Labels = &labels
+		plan.changed = true
+	}
+	// Do not claim an identical pre-existing user label as plugin-owned when
+	// a manually linked task has no ownership marker. We persist ownership
+	// only when this reconciliation actually changes labels, or when replacing
+	// or clearing an existing marker.
+	plan.trackerMarkerChanged = plan.update.Labels != nil ||
+		(link.AppliedTrackerLabel != "" && link.AppliedTrackerLabel != plan.desiredTrackerLabel)
+	return plan
+}
+
+func (s *Service) finishInbound(ctx context.Context, taskID string, plan inboundPlan) error {
+	if plan.trackerMarkerChanged {
+		if err := s.tasklink.RecordAppliedTrackerLabel(ctx, taskID, plan.desiredTrackerLabel); err != nil {
+			return err
 		}
 	}
-
-	if !changed {
-		return nil
-	}
-	if _, err := s.host.Tasks().Update(ctx, update); err != nil {
-		return fmt.Errorf("sync: applying inbound update to task %s: %w", taskID, err)
+	if plan.consumeStatusEcho {
+		return s.tasklink.ConsumeStatusEcho(ctx, taskID)
 	}
 	return nil
 }
 
-func applyTitleAndDescription(update *pluginsdk.UpdateTaskInput, issue issues.Issue, link tasklink.Link) bool {
+func applyTitleAndDescriptionInbound(update *pluginsdk.UpdateTaskInput, issue issues.Issue, task pluginsdk.Task) bool {
 	changed := false
-	titleEcho := link.LastPushedTitle != "" && link.LastPushedTitle == issue.Subject
-	if !titleEcho && issue.Subject != "" {
-		subject := issue.Subject
-		update.Title = &subject
+	if issue.Subject != "" && issue.Subject != task.Title {
+		update.Title = &issue.Subject
 		changed = true
 	}
-	descEcho := link.LastPushedDescriptionHash != "" && link.LastPushedDescriptionHash == tasklink.HashDescription(issue.Description)
-	if !descEcho {
-		description := issue.Description
-		update.Description = &description
+	if issue.Description != task.Description {
+		update.Description = &issue.Description
 		changed = true
 	}
 	return changed
+}
+
+// reconcileTrackerLabels removes only the previously plugin-owned label and
+// adds the desired mapping if absent. Every unrelated label and its order are
+// preserved exactly.
+func reconcileTrackerLabels(current []string, appliedMarker, desiredLabel string) []string {
+	if appliedMarker == desiredLabel && (desiredLabel == "" || containsLabel(current, desiredLabel)) {
+		return append([]string(nil), current...)
+	}
+	out := make([]string, 0, len(current)+1)
+	for _, label := range current {
+		if appliedMarker != "" && label == appliedMarker {
+			continue
+		}
+		out = append(out, label)
+	}
+	if desiredLabel != "" && !containsLabel(out, desiredLabel) {
+		out = append(out, desiredLabel)
+	}
+	return out
+}
+
+func containsLabel(labels []string, want string) bool {
+	for _, label := range labels {
+		if label == want {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // PushWriteback issues an outbound status PUT when a linked task moves to a
@@ -199,7 +286,7 @@ func applyTitleAndDescription(update *pluginsdk.UpdateTaskInput, issue issues.Is
 // enabled. A no-op when the task isn't linked, the step has no mapping, the
 // option is disabled, or the mapped status already matches what was last
 // pushed (idempotent against a duplicate task.moved delivery or a
-// reconciliation poll re-observing the same, already-applied state).
+// duplicate task.moved delivery re-observing the same, already-applied state).
 func (s *Service) PushWriteback(ctx context.Context, taskID, toWorkflowStepID string, mapping fieldmapping.Mapping, issuesSvc *issues.Service, opts Options) error {
 	if !opts.AutoStatusWriteback {
 		return nil
@@ -224,7 +311,14 @@ func (s *Service) forceWriteback(ctx context.Context, taskID string, statusID in
 	if err != nil || !found {
 		return err
 	}
-	if link.LastPushedStatusID != nil && *link.LastPushedStatusID == statusID {
+	// Echo markers are intentionally one-shot. Once inbound polling consumes
+	// one, a redelivered task.moved must still not issue a second PUT when
+	// Redmine already reflects the requested status.
+	issue, err := issuesSvc.GetIssue(ctx, link.IssueID)
+	if err != nil {
+		return fmt.Errorf("sync: reading issue %d before write-back: %w", link.IssueID, err)
+	}
+	if issue.StatusID == statusID {
 		return nil
 	}
 	if err := issuesSvc.UpdateIssue(ctx, link.IssueID, issues.IssueWrite{StatusID: statusID}); err != nil {

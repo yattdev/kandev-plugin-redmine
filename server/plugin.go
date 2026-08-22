@@ -5,17 +5,18 @@
 //
 // redminePlugin composes one Service per domain package (connection,
 // projects, fieldmapping, tasklink, sync, watch) and wires them together:
-// SetHost is the plugin's only lifecycle hook (called once, after the
+// SetHost is the plugin's only public lifecycle hook (called once, after the
 // go-plugin broker connection completes), so it both injects the Host into
-// every service and starts the plugin's own background loops — there is no
-// host healthpoll/watchreset equivalent for plugins (plan Risks), so this
-// plugin owns polling entirely.
+// every service and starts the plugin's own background loops. The SDK has no
+// public shutdown callback: production shutdown is process termination; the
+// internal stop method below exists for tests and controlled in-process use.
 package main
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -30,18 +31,29 @@ import (
 	"github.com/kandev/kandev/pkg/pluginsdk"
 )
 
-// syncPollInterval is the inbound-sync / write-back-reconciliation cadence.
-// Outbound write-back also has a near-real-time path via OnEvent
-// ("task.moved"); this poll is the backstop for missed events and the only
-// path for inbound changes (see internal/sync's package doc comment).
-const syncPollInterval = 60 * time.Second
+// defaultSyncPollInterval is the production inbound-sync cadence. Outbound
+// status changes are sent only by the task.moved event path or the manual
+// status action. The environment override exists for deterministic packaged
+// integration tests; invalid or sub-second values retain the safe default.
+const defaultSyncPollInterval = 60 * time.Second
+
+func configuredSyncPollInterval() time.Duration {
+	interval, err := time.ParseDuration(os.Getenv("KANDEV_REDMINE_POLL_INTERVAL"))
+	if err != nil || interval < time.Second {
+		return defaultSyncPollInterval
+	}
+	return interval
+}
 
 type redminePlugin struct {
 	pluginsdk.UnimplementedPlugin
 
-	mu    sync.Mutex
-	ready bool
-	wg    sync.WaitGroup
+	mu       sync.Mutex
+	ready    bool
+	wg       sync.WaitGroup
+	ctx      context.Context
+	cancel   context.CancelFunc
+	stopDone chan struct{}
 
 	connectionSvc   *connection.Service
 	projectsSvc     *projects.Service
@@ -65,7 +77,7 @@ func (p *redminePlugin) SetHost(host pluginsdk.Host) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.ready {
+	if p.ready || p.stopDone != nil {
 		return
 	}
 
@@ -74,19 +86,51 @@ func (p *redminePlugin) SetHost(host pluginsdk.Host) {
 	p.fieldmappingSvc = fieldmapping.New(host)
 	p.tasklinkSvc = tasklink.New(host)
 	p.syncSvc = redminesync.New(host, p.tasklinkSvc)
-	p.watchSvc = watch.New(host)
+	p.watchSvc = watch.New(host, p.tasklinkSvc)
 	p.healthPoller = connection.NewHealthPoller(p.connectionSvc)
 	p.ready = true
 
-	ctx := context.Background()
-	p.healthPoller.Start(ctx)
+	p.ctx, p.cancel = context.WithCancel(context.Background())
+	p.healthPoller.Start(p.ctx)
 	p.wg.Add(1)
-	go p.runSyncLoop(ctx)
+	go p.runSyncLoop(p.ctx)
+}
+
+// stop terminates plugin-owned goroutines. It is intentionally not part of
+// the public SDK contract: Kandev ends a production plugin by terminating its
+// subprocess. Tests call stop through t.Cleanup so in-process test plugins do
+// not outlive their test.
+func (p *redminePlugin) stop() {
+	p.mu.Lock()
+	if p.stopDone != nil {
+		done := p.stopDone
+		p.mu.Unlock()
+		<-done
+		return
+	}
+	if !p.ready {
+		p.mu.Unlock()
+		return
+	}
+	done := make(chan struct{})
+	p.stopDone = done
+	cancel := p.cancel
+	healthPoller := p.healthPoller
+	p.ready = false
+	p.mu.Unlock()
+
+	cancel()
+	healthPoller.Stop()
+	p.wg.Wait()
+
+	p.mu.Lock()
+	close(done)
+	p.mu.Unlock()
 }
 
 func (p *redminePlugin) runSyncLoop(ctx context.Context) {
 	defer p.wg.Done()
-	ticker := time.NewTicker(syncPollInterval)
+	ticker := time.NewTicker(configuredSyncPollInterval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -112,6 +156,10 @@ func (p *redminePlugin) pollAllWorkspaces(ctx context.Context) {
 }
 
 func (p *redminePlugin) pollWorkspace(ctx context.Context, workspaceID string) error {
+	enabled, err := p.connectionSvc.GetEnabled(ctx, workspaceID)
+	if err != nil || !enabled {
+		return err
+	}
 	client, err := p.connectionSvc.Client(ctx, workspaceID)
 	if err != nil {
 		return nil // not connected (or credentials rejected) - nothing to poll
@@ -148,7 +196,17 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 	if err != nil {
 		return err
 	}
+	mapping, mappingFound, err := p.fieldmappingSvc.Get(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
 	for _, w := range watches {
+		if mappingFound && needsWatchBackfill(w) {
+			w = applyWatchMapping(w, mapping)
+			if err := p.watchSvc.UpdateWatch(ctx, w); err != nil {
+				return err
+			}
+		}
 		if err := p.watchSvc.Poll(ctx, w, issuesSvc); err != nil {
 			return err
 		}
@@ -156,24 +214,60 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 	return nil
 }
 
+func needsWatchBackfill(w watch.Watch) bool {
+	return w.WorkflowID == "" || (w.StatusID != nil && w.WorkflowStepID == "") || w.TrackerLabels == nil || w.PriorityMappings == nil
+}
+
+func applyWatchMapping(w watch.Watch, mapping fieldmapping.Mapping) watch.Watch {
+	w.WorkflowID = mapping.WorkflowID
+	if w.StatusID != nil {
+		w.WorkflowStepID, _ = mapping.WorkflowStepForStatus(*w.StatusID)
+	}
+	w.TrackerLabels = make(map[int]string, len(mapping.Trackers))
+	for _, tracker := range mapping.Trackers {
+		w.TrackerLabels[tracker.RedmineTrackerID] = tracker.TaskLabel
+	}
+	w.PriorityMappings = make(map[int]string, len(mapping.Priorities))
+	for _, priority := range mapping.Priorities {
+		w.PriorityMappings[priority.RedminePriorityID] = priority.TaskPriority
+	}
+	return w
+}
+
 // OnEvent handles task.moved for near-real-time outbound write-back (see
 // manifest.yaml's capabilities.events doc comment for why this plugin
-// declares an events capability at all). Every other event type is ignored;
-// events delivery is best-effort, so a missed task.moved still converges on
-// the next sync poll (pollWorkspace calls PollInbound only — write-back
-// reconciliation for a missed event happens on the *next task.moved* or via
-// the manual "Set Redmine status" action, since inferring "this step is
-// mapped and doesn't match Redmine" from polling alone would require
-// fetching every linked task's current step on every tick; OnEvent is the
-// intended primary path and is expected to be reliable in the common case).
+// declares an events capability at all). Every other event type is ignored.
+// Polling is inbound only: a missed task.moved is not reconstructed by a
+// later poll and can instead be corrected with another move or the manual
+// "Set Redmine status" action.
 func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
-	if e == nil || e.EventType != "task.moved" {
+	if e == nil {
 		return nil
 	}
 	p.mu.Lock()
 	ready := p.ready
 	p.mu.Unlock()
 	if !ready {
+		return nil
+	}
+	if e.EventType == "workspace.deleted" {
+		workspaceID := e.WorkspaceID
+		if workspaceID == "" {
+			workspaceID, _ = e.Payload["workspace_id"].(string)
+		}
+		if workspaceID == "" {
+			return nil
+		}
+		return p.clearWorkspace(ctx, workspaceID, true)
+	}
+	if e.EventType == "task.deleted" {
+		taskID, _ := e.Payload["task_id"].(string)
+		if taskID == "" {
+			return nil
+		}
+		return p.tasklinkSvc.Unset(ctx, taskID)
+	}
+	if e.EventType != "task.moved" {
 		return nil
 	}
 
@@ -206,6 +300,13 @@ func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
 	if !opts.AutoStatusWriteback {
 		return nil
 	}
+	enabled, err := p.connectionSvc.GetEnabled(ctx, link.WorkspaceID)
+	if err != nil {
+		return fmt.Errorf("redmine: OnEvent task.moved: reading enabled state for workspace %s: %w", link.WorkspaceID, err)
+	}
+	if !enabled {
+		return nil
+	}
 
 	client, err := p.connectionSvc.Client(ctx, link.WorkspaceID)
 	if err != nil {
@@ -213,4 +314,29 @@ func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
 	}
 
 	return p.syncSvc.PushWriteback(ctx, taskID, toStepID, mapping, issues.New(client), opts)
+}
+
+func (p *redminePlugin) clearWorkspace(ctx context.Context, workspaceID string, clearEnabled bool) error {
+	if err := p.watchSvc.ClearWorkspace(ctx, workspaceID); err != nil {
+		return fmt.Errorf("redmine: clearing watches: %w", err)
+	}
+	if err := p.tasklinkSvc.ClearWorkspace(ctx, workspaceID); err != nil {
+		return fmt.Errorf("redmine: clearing links: %w", err)
+	}
+	if err := p.projectsSvc.Clear(ctx, workspaceID); err != nil {
+		return err
+	}
+	if err := p.fieldmappingSvc.Clear(ctx, workspaceID); err != nil {
+		return err
+	}
+	if err := p.syncSvc.Clear(ctx, workspaceID); err != nil {
+		return err
+	}
+	if err := p.connectionSvc.Disconnect(ctx, workspaceID); err != nil {
+		return err
+	}
+	if clearEnabled {
+		return p.connectionSvc.ClearEnabled(ctx, workspaceID)
+	}
+	return nil
 }

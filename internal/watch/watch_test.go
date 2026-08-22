@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"kandev-plugin-redmine/internal/issues"
 	"kandev-plugin-redmine/internal/redmineclient"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func newIssuesService(t *testing.T, handler http.HandlerFunc) *issues.Service {
@@ -19,6 +22,143 @@ func newIssuesService(t *testing.T, handler http.HandlerFunc) *issues.Service {
 	t.Cleanup(srv.Close)
 	client := redmineclient.New(srv.URL, "key", srv.Client())
 	return issues.New(client)
+}
+
+func TestPoll_ConcurrentCallsCreateOnlyOneTask(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	issuesSvc := newIssuesService(t, oneIssuePage(42, "New issue"))
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() { defer wg.Done(); errs <- svc.Poll(context.Background(), w, issuesSvc) }()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Len(t, host.tasks, 1)
+}
+
+func TestPoll_RacingDeleteLeavesNoOwnedTaskOrIndex(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	issuesSvc := newIssuesService(t, oneIssuePage(42, "New issue"))
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); errs <- svc.Poll(context.Background(), w, issuesSvc) }()
+	go func() { defer wg.Done(); errs <- svc.DeleteWatch(context.Background(), "ws-1", w.ID) }()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Empty(t, host.tasks)
+	watches, err := svc.ListWatches(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.Empty(t, watches)
+	tasks, err := svc.watchTasks(context.Background(), "ws-1", w.ID)
+	require.NoError(t, err)
+	require.Empty(t, tasks)
+}
+
+func TestPoll_RecordFailureCompensatesCreatedTaskAndRetryCreatesOnce(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	host.setStateErr = fmt.Errorf("state unavailable")
+	issuesSvc := newIssuesService(t, oneIssuePage(42, "New issue"))
+	require.Error(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Empty(t, host.tasks)
+	require.Len(t, host.deletedTaskIDs(), 1)
+	_, found, err := svc.tasklinks.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.False(t, found)
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Len(t, host.tasks, 1)
+}
+
+func TestPoll_WatchIndexFailureCompensatesTaskAndLink(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	// Link persistence performs two writes, the tracker marker is the third,
+	// and the watcher dedup index is the fourth.
+	host.setStateCalls = 0
+	host.failSetStateAt = 4
+	require.Error(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "x"))))
+	require.Empty(t, host.tasks)
+	tasks, err := svc.watchTasks(context.Background(), "ws-1", w.ID)
+	require.NoError(t, err)
+	require.Empty(t, tasks)
+	_, found, err := svc.tasklinks.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestPoll_TrackerMarkerFailureCompensatesTaskAndLink(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{
+		WorkspaceID: "ws-1", ProjectID: 1, Enabled: true,
+		TrackerLabels: map[int]string{3: "bug"},
+	})
+	require.NoError(t, err)
+	host.setStateCalls = 0
+	host.failSetStateAt = 3
+	issuesSvc := newIssuesService(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"x","tracker":{"id":3}}],"total_count":1}`))
+	})
+
+	require.ErrorContains(t, svc.Poll(context.Background(), w, issuesSvc), "recording tracker label")
+	require.Empty(t, host.tasks)
+	require.Len(t, host.deletedTaskIDs(), 1)
+	_, found, err := svc.tasklinks.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestPoll_ThrottlePropagatesTransientTaskReadFailure(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true, MaxInflightTasks: 1})
+	require.NoError(t, err)
+	require.NoError(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "first"))))
+	host.getTaskErr = fmt.Errorf("temporary host failure")
+	require.ErrorContains(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(99, "second"))), "reading task")
+	host.getTaskErr = status.Error(codes.NotFound, "gone")
+	require.NoError(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(99, "second"))))
+}
+
+func TestPoll_RacingClearWorkspaceLeavesNoOwnedTaskOrWatch(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	issuesSvc := newIssuesService(t, oneIssuePage(42, "New issue"))
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); errs <- svc.Poll(context.Background(), w, issuesSvc) }()
+	go func() { defer wg.Done(); errs <- svc.ClearWorkspace(context.Background(), "ws-1") }()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Empty(t, host.tasks)
+	watches, err := svc.ListWatches(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.Empty(t, watches)
 }
 
 func oneIssuePage(id int, subject string) http.HandlerFunc {
@@ -30,7 +170,7 @@ func oneIssuePage(id int, subject string) http.HandlerFunc {
 
 func TestCreateWatch_ThenPoll_CreatesOneTaskForMatchingIssue(t *testing.T) {
 	host := newFakeHost()
-	svc := New(host)
+	svc := newWatchService(host)
 	watchObj, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
 	require.NoError(t, err)
 
@@ -39,13 +179,145 @@ func TestCreateWatch_ThenPoll_CreatesOneTaskForMatchingIssue(t *testing.T) {
 
 	require.Len(t, host.tasks, 1)
 	for _, task := range host.tasks {
-		require.Equal(t, watchObj.ID, task.Metadata[metadataKeyWatchID])
+		require.Equal(t, watchObj.ID, taskPluginMetadata(task)[metadataKeyWatchID])
 	}
+}
+
+func TestPoll_CreatedTaskIsLinkedAndReverseIndexed(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	require.NoError(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "linked"))))
+
+	taskID := svc.mustWatchTaskID(t, "ws-1", w.ID, 42)
+	link, found, err := svc.tasklinks.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, 42, link.IssueID)
+	require.Equal(t, "ws-1", link.WorkspaceID)
+	resolved, found, err := svc.tasklinks.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, taskID, resolved)
+
+	// Both the watcher dedup index and shared reverse index suppress a second
+	// task for the same issue.
+	require.NoError(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "linked"))))
+	require.Len(t, host.tasks, 1)
+
+	require.NoError(t, svc.DeleteWatch(context.Background(), "ws-1", w.ID))
+	_, found, err = svc.tasklinks.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	require.False(t, found)
+	_, found, err = svc.tasklinks.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestPoll_CreatedTaskLinkRecordsOwnedTrackerLabel(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{
+		WorkspaceID: "ws-1", ProjectID: 1, Enabled: true,
+		TrackerLabels: map[int]string{3: "bug"},
+	})
+	require.NoError(t, err)
+	issuesSvc := newIssuesService(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"linked","tracker":{"id":3}}],"total_count":1}`))
+	})
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+
+	taskID := svc.mustWatchTaskID(t, "ws-1", w.ID, 42)
+	link, found, err := svc.tasklinks.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "bug", link.AppliedTrackerLabel)
+}
+
+func TestDeleteWatchFailsClosedWithoutTaskTreeManager(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	require.NoError(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "linked"))))
+	taskID := svc.mustWatchTaskID(t, "ws-1", w.ID, 42)
+
+	failClosed := New(hostWithoutTaskTrees{Host: host}, svc.tasklinks)
+	require.ErrorContains(t, failClosed.DeleteWatch(context.Background(), "ws-1", w.ID), "lacks PluginOwnedTaskTrees")
+	require.Contains(t, host.tasks, taskID)
+	_, found, err := svc.tasklinks.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	require.True(t, found)
+}
+
+func TestDeleteWatchRejectsDifferentWorkspaceLinkBeforeTaskDelete(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	require.NoError(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "linked"))))
+	taskID := svc.mustWatchTaskID(t, "ws-1", w.ID, 42)
+	require.NoError(t, svc.tasklinks.Set(context.Background(), taskID, "ws-2", 42, "https://other.example/issues/42"))
+
+	require.ErrorContains(t, svc.DeleteWatch(context.Background(), "ws-1", w.ID), "link owned by workspace ws-2")
+	require.Contains(t, host.tasks, taskID)
+	link, found, err := svc.tasklinks.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "ws-2", link.WorkspaceID)
+}
+
+func TestClearWorkspaceRemovesWatcherTaskLinks(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	require.NoError(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "linked"))))
+	taskID := svc.mustWatchTaskID(t, "ws-1", w.ID, 42)
+
+	require.NoError(t, svc.ClearWorkspace(context.Background(), "ws-1"))
+	require.NotContains(t, host.tasks, taskID)
+	_, found, err := svc.tasklinks.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	require.False(t, found)
+	_, found, err = svc.tasklinks.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func (s *Service) mustWatchTaskID(t *testing.T, workspaceID, watchID string, issueID int) string {
+	t.Helper()
+	tasks, err := s.watchTasks(context.Background(), workspaceID, watchID)
+	require.NoError(t, err)
+	return tasks[issueID]
+}
+
+func TestPoll_CreatesTaskInMappedWorkflowWithPriorityAndTrackerLabel(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	watchObj, err := svc.CreateWatch(context.Background(), Watch{
+		WorkspaceID: "ws-1", WorkflowID: "wf-secondary", WorkflowStepID: "step-triage", ProjectID: 1, Enabled: true,
+		TrackerLabels: map[int]string{3: "bug"}, PriorityMappings: map[int]string{4: "high"},
+	})
+	require.NoError(t, err)
+	issuesSvc := newIssuesService(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"New issue","tracker":{"id":3},"priority":{"id":4}}],"total_count":1}`))
+	})
+	require.NoError(t, svc.Poll(context.Background(), watchObj, issuesSvc))
+	for _, task := range host.tasks {
+		require.Equal(t, "high", task.Priority)
+		require.Equal(t, []string{"bug"}, task.Labels)
+	}
+	require.Len(t, host.creates, 1)
+	require.Equal(t, "wf-secondary", host.creates[0].WorkflowID)
+	require.NotNil(t, host.creates[0].WorkflowStepID)
+	require.Equal(t, "step-triage", *host.creates[0].WorkflowStepID)
 }
 
 func TestPoll_AlreadySeenIssue_CreatesNoSecondTask(t *testing.T) {
 	host := newFakeHost()
-	svc := New(host)
+	svc := newWatchService(host)
 	watchObj, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
 	require.NoError(t, err)
 
@@ -63,7 +335,7 @@ func TestPoll_AlreadySeenIssue_CreatesNoSecondTask(t *testing.T) {
 // integration originally shipped with).
 func TestThrottleCapEnforced(t *testing.T) {
 	host := newFakeHost()
-	svc := New(host)
+	svc := newWatchService(host)
 	watchObj, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true, MaxInflightTasks: 1})
 	require.NoError(t, err)
 
@@ -88,7 +360,7 @@ func TestThrottleCapEnforced(t *testing.T) {
 
 func TestThrottleCapEnforced_UnlimitedWhenZero(t *testing.T) {
 	host := newFakeHost()
-	svc := New(host)
+	svc := newWatchService(host)
 	watchObj, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true, MaxInflightTasks: 0})
 	require.NoError(t, err)
 
@@ -99,7 +371,7 @@ func TestThrottleCapEnforced_UnlimitedWhenZero(t *testing.T) {
 
 func TestPoll_DisabledWatch_IsNoOp(t *testing.T) {
 	host := newFakeHost()
-	svc := New(host)
+	svc := newWatchService(host)
 	watchObj, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: false})
 	require.NoError(t, err)
 
@@ -107,9 +379,33 @@ func TestPoll_DisabledWatch_IsNoOp(t *testing.T) {
 	require.Empty(t, host.tasks)
 }
 
+func TestPoll_TruncatesLongUnicodeSubjectToHostTitleLimit(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	watchObj, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+
+	require.NoError(t, svc.Poll(context.Background(), watchObj, newIssuesService(t, oneIssuePage(42, "éééééééééééééééééééééééééééééééééééééééééééééééééééééééé"))))
+	require.Len(t, host.tasks, 1)
+	for _, task := range host.tasks {
+		require.Len(t, []rune(task.Title), maxTaskTitleRunes)
+		require.Equal(t, '…', []rune(task.Title)[maxTaskTitleRunes-1])
+	}
+}
+
+func TestPoll_PropagatesWatchListReadFailure(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	host.getStateErr = fmt.Errorf("state unavailable")
+	err = svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "x")))
+	require.ErrorContains(t, err, "reading watches")
+}
+
 func TestDeleteWatch_CascadesTaskTreeDeleteAndRemovesFromList(t *testing.T) {
 	host := newFakeHost()
-	svc := New(host)
+	svc := newWatchService(host)
 	watchObj, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
 	require.NoError(t, err)
 	require.NoError(t, svc.Poll(context.Background(), watchObj, newIssuesService(t, oneIssuePage(42, "x"))))
@@ -125,7 +421,7 @@ func TestDeleteWatch_CascadesTaskTreeDeleteAndRemovesFromList(t *testing.T) {
 
 func TestListWatches_MultipleWatches_IndependentOfEachOther(t *testing.T) {
 	host := newFakeHost()
-	svc := New(host)
+	svc := newWatchService(host)
 	w1, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
 	require.NoError(t, err)
 	_, err = svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 2, Enabled: true})
@@ -140,7 +436,7 @@ func TestListWatches_MultipleWatches_IndependentOfEachOther(t *testing.T) {
 
 func TestFilter_TrackerAndStatusRestrictMatches(t *testing.T) {
 	host := newFakeHost()
-	svc := New(host)
+	svc := newWatchService(host)
 	trackerID := 3
 	watchObj, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true, TrackerID: &trackerID})
 	require.NoError(t, err)
@@ -161,4 +457,29 @@ func TestFilter_TrackerAndStatusRestrictMatches(t *testing.T) {
 	for _, task := range host.tasks {
 		require.Contains(t, task.Title, "right tracker")
 	}
+}
+
+func TestPoll_PaginatesBeyondOneHundredIssues(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+
+	issuesSvc := newIssuesService(t, func(res http.ResponseWriter, req *http.Request) {
+		offset := req.URL.Query().Get("offset")
+		start, end := 0, 100
+		if offset == "100" {
+			start, end = 100, 101
+		}
+		_, _ = fmt.Fprint(res, `{"issues":[`)
+		for i := start; i < end; i++ {
+			if i > start {
+				_, _ = fmt.Fprint(res, ",")
+			}
+			_, _ = fmt.Fprintf(res, `{"id":%d,"subject":"issue %d"}`, i+1, i+1)
+		}
+		_, _ = fmt.Fprint(res, `],"total_count":101}`)
+	})
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Len(t, host.tasks, 101)
 }

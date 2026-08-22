@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"strconv"
 
 	"kandev-plugin-redmine/internal/redmineclient"
@@ -23,6 +24,8 @@ type Issue struct {
 	TrackerID    int
 	StatusID     int
 	PriorityID   int
+	AssigneeID   int
+	CategoryID   int
 	UpdatedOn    string
 	CustomFields []CustomFieldValue
 	Journals     []Journal
@@ -31,8 +34,9 @@ type Issue struct {
 }
 
 type CustomFieldValue struct {
-	ID    int `json:"id"`
-	Value any `json:"value"`
+	ID    int    `json:"id"`
+	Name  string `json:"name,omitempty"`
+	Value any    `json:"value"`
 }
 
 type Journal struct {
@@ -64,6 +68,8 @@ type rawIssue struct {
 	Tracker      idRef              `json:"tracker"`
 	Status       idRef              `json:"status"`
 	Priority     idRef              `json:"priority"`
+	Assignee     idRef              `json:"assigned_to"`
+	Category     idRef              `json:"category"`
 	UpdatedOn    string             `json:"updated_on"`
 	CustomFields []CustomFieldValue `json:"custom_fields"`
 	Journals     []Journal          `json:"journals"`
@@ -81,6 +87,8 @@ func (r rawIssue) toIssue(baseURL string) Issue {
 		TrackerID:    r.Tracker.ID,
 		StatusID:     r.Status.ID,
 		PriorityID:   r.Priority.ID,
+		AssigneeID:   r.Assignee.ID,
+		CategoryID:   r.Category.ID,
 		UpdatedOn:    r.UpdatedOn,
 		CustomFields: r.CustomFields,
 		Journals:     r.Journals,
@@ -121,8 +129,23 @@ type ListIssuesParams struct {
 	// UpdatedOnFrom is a Redmine date-filter operator string, e.g.
 	// ">=2026-01-01T00:00:00Z" (see internal/sync's cursor-based poll).
 	UpdatedOnFrom string
+	// Filters contains Redmine API filter query parameters. Callers only
+	// populate validated, plugin-owned keys (tracker_id, status_id,
+	// priority_id, assigned_to_id, category_id, and cf_<positive-id>).
+	Filters map[string]string
+	// NativeFilters uses Redmine's advanced issue-filter grammar, so callers
+	// can offer the same add/remove field model as Redmine's Issues page.
+	NativeFilters []NativeFilter
 	Offset        int
 	Limit         int
+}
+
+// NativeFilter is one Redmine issue-list predicate. Field and operator are
+// server-validated before this package receives them.
+type NativeFilter struct {
+	Field    string
+	Operator string
+	Value    string
 }
 
 type ListIssuesResult struct {
@@ -139,22 +162,36 @@ type issuesListEnvelope struct {
 // Redmine defaults to open-only, which would silently drop closed-issue
 // updates from sync and watcher polling (spec "Issue read/write").
 func (s *Service) ListIssues(ctx context.Context, params ListIssuesParams) (*ListIssuesResult, error) {
-	query := map[string]string{"status_id": "*"}
+	query := url.Values{"status_id": {"*"}}
 	if params.ProjectID != "" {
-		query["project_id"] = params.ProjectID
+		query.Set("project_id", params.ProjectID)
 	}
 	if params.UpdatedOnFrom != "" {
-		query["updated_on"] = params.UpdatedOnFrom
+		query.Set("updated_on", params.UpdatedOnFrom)
+	}
+	for key, value := range params.Filters {
+		if value != "" {
+			query.Set(key, value)
+		}
 	}
 	limit := params.Limit
 	if limit <= 0 {
 		limit = 100
 	}
-	query["offset"] = strconv.Itoa(params.Offset)
-	query["limit"] = strconv.Itoa(limit)
+	for _, filter := range params.NativeFilters {
+		if filter.Field == "" || filter.Operator == "" || filter.Value == "" {
+			continue
+		}
+		query.Set("set_filter", "1")
+		query.Add("f[]", filter.Field)
+		query.Set("op["+filter.Field+"]", filter.Operator)
+		query.Add("v["+filter.Field+"][]", filter.Value)
+	}
+	query.Set("offset", strconv.Itoa(params.Offset))
+	query.Set("limit", strconv.Itoa(limit))
 
 	var out issuesListEnvelope
-	if err := s.client.GetJSON(ctx, "/issues.json", query, &out); err != nil {
+	if err := s.client.GetJSONValues(ctx, "/issues.json", query, &out); err != nil {
 		return nil, err
 	}
 	result := ListIssuesResult{Issues: make([]Issue, len(out.Issues)), TotalCount: out.TotalCount}
@@ -173,13 +210,36 @@ type IssueWrite struct {
 	Subject      string
 	Description  string
 	CustomFields []CustomFieldValue
-	// UploadTokens are tokens returned by UploadAttachment, included in the
-	// write payload's "uploads" array to attach files to the issue.
-	UploadTokens []string
+	// Uploads are the token and file metadata returned/provided by Redmine's
+	// two-step upload flow. Redmine requires filename on both the upload query
+	// and the issue write payload.
+	Uploads []Upload
+}
+
+// IssueUpdate preserves JSON-field presence for partial issue updates. A nil
+// pointer means leave the Redmine value untouched; a non-nil pointer may
+// deliberately carry an empty string (for example to clear description).
+type IssueUpdate struct {
+	ProjectID    *int
+	TrackerID    *int
+	StatusID     *int
+	PriorityID   *int
+	Subject      *string
+	Description  *string
+	CustomFields *[]CustomFieldValue
+	Uploads      *[]Upload
 }
 
 type uploadRef struct {
-	Token string `json:"token"`
+	Token       string `json:"token"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type,omitempty"`
+}
+
+type Upload struct {
+	Token       string `json:"token"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
 type issueWriteBody struct {
@@ -197,10 +257,25 @@ type issueWritePayload struct {
 	Issue issueWriteBody `json:"issue"`
 }
 
+type issueUpdateBody struct {
+	ProjectID    *int                `json:"project_id,omitempty"`
+	TrackerID    *int                `json:"tracker_id,omitempty"`
+	StatusID     *int                `json:"status_id,omitempty"`
+	PriorityID   *int                `json:"priority_id,omitempty"`
+	Subject      *string             `json:"subject,omitempty"`
+	Description  *string             `json:"description,omitempty"`
+	CustomFields *[]CustomFieldValue `json:"custom_fields,omitempty"`
+	Uploads      *[]uploadRef        `json:"uploads,omitempty"`
+}
+
+type issueUpdatePayload struct {
+	Issue issueUpdateBody `json:"issue"`
+}
+
 func (w IssueWrite) toBody() issueWriteBody {
-	uploads := make([]uploadRef, len(w.UploadTokens))
-	for i, token := range w.UploadTokens {
-		uploads[i] = uploadRef{Token: token}
+	uploads := make([]uploadRef, len(w.Uploads))
+	for i, upload := range w.Uploads {
+		uploads[i] = uploadRef{Token: upload.Token, Filename: upload.Filename, ContentType: upload.ContentType}
 	}
 	return issueWriteBody{
 		ProjectID:    w.ProjectID,
@@ -212,6 +287,22 @@ func (w IssueWrite) toBody() issueWriteBody {
 		CustomFields: w.CustomFields,
 		Uploads:      uploads,
 	}
+}
+
+func (w IssueUpdate) toBody() issueUpdateBody {
+	body := issueUpdateBody{
+		ProjectID: w.ProjectID, TrackerID: w.TrackerID, StatusID: w.StatusID,
+		PriorityID: w.PriorityID, Subject: w.Subject, Description: w.Description,
+		CustomFields: w.CustomFields,
+	}
+	if w.Uploads != nil {
+		uploads := make([]uploadRef, len(*w.Uploads))
+		for i, upload := range *w.Uploads {
+			uploads[i] = uploadRef{Token: upload.Token, Filename: upload.Filename, ContentType: upload.ContentType}
+		}
+		body.Uploads = &uploads
+	}
+	return body
 }
 
 // CreateIssue creates a new issue via POST /issues.json, returning its id
@@ -232,6 +323,13 @@ func (s *Service) UpdateIssue(ctx context.Context, id int, write IssueWrite) err
 	return s.client.PutJSON(ctx, fmt.Sprintf("/issues/%d.json", id), issueWritePayload{Issue: write.toBody()}, nil)
 }
 
+// UpdateIssueFields performs a partial update while retaining the caller's
+// presence information. In particular, Description: ptr("") serializes an
+// explicit clear whereas Description: nil omits description entirely.
+func (s *Service) UpdateIssueFields(ctx context.Context, id int, update IssueUpdate) error {
+	return s.client.PutJSON(ctx, fmt.Sprintf("/issues/%d.json", id), issueUpdatePayload{Issue: update.toBody()}, nil)
+}
+
 type uploadEnvelope struct {
 	Upload struct {
 		Token string `json:"token"`
@@ -239,13 +337,22 @@ type uploadEnvelope struct {
 }
 
 // UploadAttachment performs the two-step attachment flow's first step: POST
-// /uploads.json with the raw file bytes and Content-Type:
+// /uploads.json?filename=<name> with the raw file bytes and Content-Type:
 // application/octet-stream, returning the token to pass as one of
-// IssueWrite.UploadTokens on a following CreateIssue/UpdateIssue call.
-func (s *Service) UploadAttachment(ctx context.Context, content io.Reader) (string, error) {
-	var out uploadEnvelope
-	if err := s.client.PostBinary(ctx, "/uploads.json", "application/octet-stream", content, &out); err != nil {
-		return "", err
+// IssueWrite.Uploads on a following CreateIssue/UpdateIssue call.
+func (s *Service) UploadAttachment(ctx context.Context, filename, contentType string, content io.Reader) (Upload, error) {
+	if filename == "" {
+		return Upload{}, fmt.Errorf("issues: attachment filename is required")
 	}
-	return out.Upload.Token, nil
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	var out uploadEnvelope
+	// Redmine's uploads endpoint accepts raw binary with this fixed transport
+	// media type. The user-provided MIME belongs to the later uploads[] issue
+	// metadata, not to this HTTP request.
+	if err := s.client.PostBinary(ctx, "/uploads.json", "application/octet-stream", content, map[string]string{"filename": filename}, &out); err != nil {
+		return Upload{}, err
+	}
+	return Upload{Token: out.Upload.Token, Filename: filename, ContentType: contentType}, nil
 }

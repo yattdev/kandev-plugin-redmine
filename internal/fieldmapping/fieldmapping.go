@@ -48,6 +48,7 @@ type CustomField struct {
 
 // Mapping is the full persisted per-workspace field mapping.
 type Mapping struct {
+	WorkflowID string            `json:"workflow_id"`
 	Statuses   []StatusMapping   `json:"statuses"`
 	Trackers   []TrackerMapping  `json:"trackers"`
 	Priorities []PriorityMapping `json:"priorities"`
@@ -73,6 +74,32 @@ func (m Mapping) StatusForWorkflowStep(workflowStepID string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// TaskLabelForTracker resolves the inbound direction: a Redmine tracker ID
+// to the Kandev task label it maps to. Empty and absent mappings both resolve
+// as no desired label, allowing sync to remove only its previously owned
+// tracker label.
+func (m Mapping) TaskLabelForTracker(redmineTrackerID int) (string, bool) {
+	for _, t := range m.Trackers {
+		if t.RedmineTrackerID == redmineTrackerID {
+			return t.TaskLabel, t.TaskLabel != ""
+		}
+	}
+	return "", false
+}
+
+// TaskPriorityForRedminePriority resolves the inbound direction: a Redmine
+// priority ID to the Kandev task priority it maps to
+// (critical|high|medium|low). An empty TaskPriority entry is reported as
+// unmapped.
+func (m Mapping) TaskPriorityForRedminePriority(redminePriorityID int) (string, bool) {
+	for _, p := range m.Priorities {
+		if p.RedminePriorityID == redminePriorityID {
+			return p.TaskPriority, p.TaskPriority != ""
+		}
+	}
+	return "", false
 }
 
 const (
@@ -104,6 +131,13 @@ func (s *Service) Get(ctx context.Context, workspaceID string) (Mapping, bool, e
 		return Mapping{}, false, nil
 	}
 	return mappingFromMap(value), true, nil
+}
+
+func (s *Service) Clear(ctx context.Context, workspaceID string) error {
+	if err := s.host.DeleteState(ctx, stateScope, workspaceID, stateKey); err != nil {
+		return fmt.Errorf("fieldmapping: clearing: %w", err)
+	}
+	return nil
 }
 
 // DeriveCustomFieldsFromIssues unions the custom fields observed across a
@@ -156,14 +190,15 @@ func (m Mapping) toMap() map[string]any {
 		}
 	}
 	return map[string]any{
-		"statuses":   statuses,
-		"trackers":   trackers,
-		"priorities": priorities,
+		"workflow_id": m.WorkflowID,
+		"statuses":    statuses,
+		"trackers":    trackers,
+		"priorities":  priorities,
 	}
 }
 
 func mappingFromMap(m map[string]any) Mapping {
-	out := Mapping{}
+	out := Mapping{WorkflowID: asString(m["workflow_id"])}
 	for _, raw := range asSlice(m["statuses"]) {
 		row, ok := raw.(map[string]any)
 		if !ok {

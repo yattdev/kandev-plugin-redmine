@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -34,6 +35,43 @@ func TestListIssues_AlwaysSendsStatusIDWildcard(t *testing.T) {
 	_, err := svc.ListIssues(context.Background(), issues.ListIssuesParams{ProjectID: "demo"})
 	require.NoError(t, err)
 	require.Equal(t, "*", sawStatusID)
+}
+
+func TestListIssues_SendsValidatedWatchFilters(t *testing.T) {
+	var query map[string]string
+	svc := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		query = map[string]string{}
+		for key, values := range r.URL.Query() {
+			query[key] = values[0]
+		}
+		_, _ = w.Write([]byte(`{"issues":[],"total_count":0}`))
+	})
+	_, err := svc.ListIssues(context.Background(), issues.ListIssuesParams{ProjectID: "7", Filters: map[string]string{"priority_id": "4", "assigned_to_id": "12", "category_id": "8", "cf_3": "Gold"}})
+	require.NoError(t, err)
+	require.Equal(t, "7", query["project_id"])
+	require.Equal(t, "4", query["priority_id"])
+	require.Equal(t, "12", query["assigned_to_id"])
+	require.Equal(t, "8", query["category_id"])
+	require.Equal(t, "Gold", query["cf_3"])
+}
+
+func TestListIssues_SendsRedmineNativeAdvancedFilters(t *testing.T) {
+	var query url.Values
+	svc := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		_, _ = w.Write([]byte(`{"issues":[],"total_count":0}`))
+	})
+	_, err := svc.ListIssues(context.Background(), issues.ListIssuesParams{ProjectID: "7", NativeFilters: []issues.NativeFilter{
+		{Field: "status_id", Operator: "=", Value: "2"},
+		{Field: "subject", Operator: "~", Value: "incident"},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, "1", query.Get("set_filter"))
+	require.ElementsMatch(t, []string{"status_id", "subject"}, query["f[]"])
+	require.Equal(t, "=", query.Get("op[status_id]"))
+	require.Equal(t, "~", query.Get("op[subject]"))
+	require.Equal(t, []string{"2"}, query["v[status_id][]"])
+	require.Equal(t, []string{"incident"}, query["v[subject][]"])
 }
 
 func TestListIssues_ClosedIssueIncludedInResults(t *testing.T) {
@@ -132,15 +170,39 @@ func TestUpdateIssue_SendsFullFieldSet(t *testing.T) {
 	require.Equal(t, "Updated subject", issueBody["subject"])
 }
 
+func TestUpdateIssueFields_PreservesOmittedAndExplicitEmptyDescription(t *testing.T) {
+	var bodies []map[string]any
+	svc := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		bodies = append(bodies, body)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	status := 5
+	require.NoError(t, svc.UpdateIssueFields(context.Background(), 42, issues.IssueUpdate{StatusID: &status}))
+	empty := ""
+	require.NoError(t, svc.UpdateIssueFields(context.Background(), 42, issues.IssueUpdate{Description: &empty}))
+
+	first := bodies[0]["issue"].(map[string]any)
+	require.EqualValues(t, 5, first["status_id"])
+	_, found := first["description"]
+	require.False(t, found, "an omitted description must not clear Redmine")
+	second := bodies[1]["issue"].(map[string]any)
+	require.Equal(t, "", second["description"], "an explicit empty description clears Redmine")
+}
+
 func TestUploadAttachment_ThenCreateIssue_IncludesTokenInUploadsArray(t *testing.T) {
 	var gotUploadContentType string
 	var gotUploadBody []byte
+	var gotUploadFilename string
 	var gotCreateBody map[string]any
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/uploads.json":
 			gotUploadContentType = r.Header.Get("Content-Type")
+			gotUploadFilename = r.URL.Query().Get("filename")
 			gotUploadBody, _ = io.ReadAll(r.Body)
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"upload":{"id":1,"token":"abc123.def456"}}`))
@@ -158,15 +220,16 @@ func TestUploadAttachment_ThenCreateIssue_IncludesTokenInUploadsArray(t *testing
 	client := redmineclient.New(srv.URL, "key", srv.Client())
 	svc := issues.New(client)
 
-	token, err := svc.UploadAttachment(context.Background(), strings.NewReader("file contents"))
+	upload, err := svc.UploadAttachment(context.Background(), "evidence.txt", "text/plain", strings.NewReader("file contents"))
 	require.NoError(t, err)
-	require.Equal(t, "abc123.def456", token)
+	require.Equal(t, "abc123.def456", upload.Token)
 	require.Equal(t, "application/octet-stream", gotUploadContentType)
+	require.Equal(t, "evidence.txt", gotUploadFilename)
 	require.Equal(t, "file contents", string(gotUploadBody))
 
 	_, err = svc.CreateIssue(context.Background(), issues.IssueWrite{
-		Subject:      "with attachment",
-		UploadTokens: []string{token},
+		Subject: "with attachment",
+		Uploads: []issues.Upload{upload},
 	})
 	require.NoError(t, err)
 
@@ -175,7 +238,9 @@ func TestUploadAttachment_ThenCreateIssue_IncludesTokenInUploadsArray(t *testing
 	uploads, ok := issueBody["uploads"].([]any)
 	require.True(t, ok)
 	require.Len(t, uploads, 1)
-	upload, ok := uploads[0].(map[string]any)
+	uploadBody, ok := uploads[0].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "abc123.def456", upload["token"])
+	require.Equal(t, "abc123.def456", uploadBody["token"])
+	require.Equal(t, "evidence.txt", uploadBody["filename"])
+	require.Equal(t, "text/plain", uploadBody["content_type"])
 }

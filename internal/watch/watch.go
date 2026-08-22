@@ -11,12 +11,17 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 
 	"kandev-plugin-redmine/internal/issues"
+	"kandev-plugin-redmine/internal/tasklink"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // metadataKeyWatchID is the single source of truth for the task-metadata key
@@ -27,6 +32,8 @@ import (
 // by construction rather than by convention.
 const metadataKeyWatchID = "redmine_watch_id"
 const metadataKeyIssueID = "redmine_issue_id"
+const pluginMetadataKey = "plugin:kandev-plugin-redmine"
+const maxTaskTitleRunes = 60
 
 // terminalTaskStates mirrors pkg/api/v1.IsTerminalTaskState's value set
 // (COMPLETED/FAILED/CANCELLED) — a watcher task in any other state still
@@ -35,13 +42,35 @@ var terminalTaskStates = map[string]bool{"COMPLETED": true, "FAILED": true, "CAN
 
 // Watch is one structured issue-watch definition.
 type Watch struct {
-	ID               string
-	WorkspaceID      string
-	ProjectID        int
-	TrackerID        *int
-	StatusID         *int
+	ID             string
+	WorkspaceID    string
+	WorkflowID     string
+	WorkflowStepID string
+	ProjectID      int
+	TrackerID      *int
+	StatusID       *int
+	PriorityID     *int
+	AssigneeID     *int
+	CategoryID     *int
+	// CustomFieldFilters is keyed by Redmine custom-field ID. Values are the
+	// live choices selected in the settings UI and are sent as cf_<id> query
+	// filters to Redmine.
+	CustomFieldFilters map[int]string
+	// Filters carries Redmine-native advanced predicates selected through the
+	// dynamic "Add filter" UI. The older typed fields above remain for
+	// backwards-compatible saved watches.
+	Filters          []Filter
+	TrackerLabels    map[int]string
+	PriorityMappings map[int]string
 	MaxInflightTasks int // 0 = unlimited
 	Enabled          bool
+}
+
+// Filter is a validated Redmine issue-list predicate.
+type Filter struct {
+	Field    string
+	Operator string
+	Value    string
 }
 
 func (w Watch) matches(issue issues.Issue) bool {
@@ -50,6 +79,27 @@ func (w Watch) matches(issue issues.Issue) bool {
 	}
 	if w.StatusID != nil && *w.StatusID != issue.StatusID {
 		return false
+	}
+	if w.PriorityID != nil && *w.PriorityID != issue.PriorityID {
+		return false
+	}
+	if w.AssigneeID != nil && *w.AssigneeID != issue.AssigneeID {
+		return false
+	}
+	if w.CategoryID != nil && *w.CategoryID != issue.CategoryID {
+		return false
+	}
+	for id, want := range w.CustomFieldFilters {
+		matched := false
+		for _, field := range issue.CustomFields {
+			if field.ID == id && fmt.Sprint(field.Value) == want {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 	return true
 }
@@ -62,15 +112,24 @@ const (
 )
 
 type Service struct {
-	host pluginsdk.Host
+	host      pluginsdk.Host
+	tasklinks *tasklink.Service
+	// One mutex deliberately serializes polls with create/update/delete/clear.
+	// This prevents duplicate issue tasks and watch resurrection; watch volume
+	// is small enough that correctness currently outweighs parallel polling.
+	mu sync.Mutex
 }
 
-func New(host pluginsdk.Host) *Service {
-	return &Service{host: host}
+// New requires the plugin's existing task-link service. This makes every
+// successfully indexed watcher task participate in the shared sync index.
+func New(host pluginsdk.Host, tasklinks *tasklink.Service) *Service {
+	return &Service{host: host, tasklinks: tasklinks}
 }
 
 // CreateWatch persists a new watch with a fresh ID.
 func (s *Service) CreateWatch(ctx context.Context, w Watch) (Watch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	id, err := newWatchID()
 	if err != nil {
 		return Watch{}, err
@@ -85,11 +144,35 @@ func (s *Service) CreateWatch(ctx context.Context, w Watch) (Watch, error) {
 // UpdateWatch persists changes to an existing watch (identified by w.ID),
 // including enabling/disabling it.
 func (s *Service) UpdateWatch(ctx context.Context, w Watch) error {
-	return s.saveWatchInList(ctx, w)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updateWatchLocked(ctx, w)
+}
+
+func (s *Service) updateWatchLocked(ctx context.Context, w Watch) error {
+	if w.ID == "" {
+		return fmt.Errorf("watch: id is required for update")
+	}
+	watches, err := s.listWatchesLocked(ctx, w.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	for _, existing := range watches {
+		if existing.ID == w.ID {
+			return s.saveWatchInList(ctx, w)
+		}
+	}
+	return fmt.Errorf("watch: %s does not belong to workspace %s", w.ID, w.WorkspaceID)
 }
 
 // ListWatches returns every watch for workspaceID.
 func (s *Service) ListWatches(ctx context.Context, workspaceID string) ([]Watch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listWatchesLocked(ctx, workspaceID)
+}
+
+func (s *Service) listWatchesLocked(ctx context.Context, workspaceID string) ([]Watch, error) {
 	value, found, err := s.host.GetState(ctx, workspaceScope, workspaceID, watchesKey)
 	if err != nil {
 		return nil, fmt.Errorf("watch: reading watches: %w", err)
@@ -113,68 +196,146 @@ func (s *Service) ListWatches(ctx context.Context, workspaceID string) ([]Watch,
 // via PluginOwnedTaskTrees, so disabling/removing a watch never leaves
 // orphaned tasks behind.
 func (s *Service) DeleteWatch(ctx context.Context, workspaceID, watchID string) error {
-	tasks, err := s.watchTasks(ctx, watchID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteWatchLocked(ctx, workspaceID, watchID)
+}
+
+func (s *Service) deleteWatchLocked(ctx context.Context, workspaceID, watchID string) error {
+	if watchID == "" {
+		return fmt.Errorf("watch: id is required for delete")
+	}
+	watches, err := s.listWatchesLocked(ctx, workspaceID)
 	if err != nil {
 		return err
 	}
-	if manager, ok := pluginsdk.PluginOwnedTaskTrees(s.host); ok {
-		for _, taskID := range tasks {
-			if _, err := manager.Delete(ctx, taskID); err != nil {
-				return fmt.Errorf("watch: cascading delete for task %s: %w", taskID, err)
-			}
+	found := false
+	for _, w := range watches {
+		if w.ID == watchID {
+			found = true
+			break
 		}
 	}
-	if err := s.host.DeleteState(ctx, watchScope, watchID, tasksKey); err != nil {
+	if !found {
+		return fmt.Errorf("watch: %s does not belong to workspace %s", watchID, workspaceID)
+	}
+	tasks, err := s.watchTasks(ctx, workspaceID, watchID)
+	if err != nil {
+		return err
+	}
+	for _, taskID := range tasks {
+		if err := s.deleteOwnedTaskAndLink(ctx, workspaceID, watchID, taskID); err != nil {
+			return err
+		}
+	}
+	if err := s.host.DeleteState(ctx, watchScope, watchStateID(workspaceID, watchID), tasksKey); err != nil {
 		return fmt.Errorf("watch: deleting task index: %w", err)
 	}
 	return s.removeWatchFromList(ctx, workspaceID, watchID)
+}
+
+// ClearWorkspace removes all watches and their plugin-owned task trees.
+func (s *Service) ClearWorkspace(ctx context.Context, workspaceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	watches, err := s.listWatchesLocked(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	for _, w := range watches {
+		if err := s.deleteWatchLocked(ctx, workspaceID, w.ID); err != nil {
+			return err
+		}
+	}
+	return s.host.DeleteState(ctx, workspaceScope, workspaceID, watchesKey)
 }
 
 // Poll fetches issues in watch's project, creates one task per newly
 // matching, not-yet-seen issue, subject to the maxInflightTasks throttle. A
 // disabled watch is a no-op.
 func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !w.Enabled {
 		return nil
 	}
-
-	result, err := issuesSvc.ListIssues(ctx, issues.ListIssuesParams{ProjectID: strconv.Itoa(w.ProjectID), Limit: 100})
+	exists, err := s.watchExistsLocked(ctx, w.WorkspaceID, w.ID)
 	if err != nil {
 		return err
 	}
+	if !exists {
+		return nil
+	}
 
-	for _, issue := range result.Issues {
-		if !w.matches(issue) {
-			continue
-		}
-		seen, err := s.hasSeen(ctx, w.ID, issue.ID)
+	for offset := 0; ; {
+		result, err := issuesSvc.ListIssues(ctx, issues.ListIssuesParams{ProjectID: strconv.Itoa(w.ProjectID), Filters: w.redmineFilters(), NativeFilters: w.nativeFilters(), Offset: offset, Limit: 100})
 		if err != nil {
 			return err
 		}
-		if seen {
-			continue
-		}
-		if w.MaxInflightTasks > 0 {
-			inflight, err := s.inflightCount(ctx, w)
+		for _, issue := range result.Issues {
+			if !w.matches(issue) {
+				continue
+			}
+			seen, err := s.hasSeen(ctx, w.WorkspaceID, w.ID, issue.ID)
 			if err != nil {
 				return err
 			}
-			if inflight >= w.MaxInflightTasks {
-				continue // leave unseen: retry once a slot frees up
+			if seen {
+				continue
+			}
+			if w.MaxInflightTasks > 0 {
+				inflight, err := s.inflightCount(ctx, w)
+				if err != nil {
+					return err
+				}
+				if inflight >= w.MaxInflightTasks {
+					continue // leave unseen: retry once a slot frees up
+				}
+			}
+			if err := s.createTask(ctx, w, issue); err != nil {
+				return err
 			}
 		}
-		if err := s.createTask(ctx, w, issue); err != nil {
-			return err
+		offset += len(result.Issues)
+		if len(result.Issues) == 0 || offset >= result.TotalCount {
+			return nil
 		}
 	}
-	return nil
+}
+
+func (s *Service) watchExistsLocked(ctx context.Context, workspaceID, watchID string) (bool, error) {
+	watches, err := s.listWatchesLocked(ctx, workspaceID)
+	if err != nil {
+		return false, err
+	}
+	for _, candidate := range watches {
+		if candidate.ID == watchID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) error {
+	labels := []string(nil)
+	appliedTrackerLabel := w.TrackerLabels[issue.TrackerID]
+	if appliedTrackerLabel != "" {
+		labels = []string{appliedTrackerLabel}
+	}
 	task, err := s.host.Tasks().Create(ctx, pluginsdk.CreateTaskInput{
 		WorkspaceID: w.WorkspaceID,
-		Title:       fmt.Sprintf("Redmine #%d: %s", issue.ID, issue.Subject),
+		WorkflowID:  w.WorkflowID,
+		WorkflowStepID: func() *string {
+			if w.WorkflowStepID == "" {
+				return nil
+			}
+			step := w.WorkflowStepID
+			return &step
+		}(),
+		Title:       watcherTaskTitle(issue.ID, issue.Subject),
 		Description: issue.Description,
+		Priority:    w.PriorityMappings[issue.PriorityID],
+		Labels:      labels,
 		Metadata: map[string]any{
 			metadataKeyWatchID: w.ID,
 			metadataKeyIssueID: issue.ID,
@@ -183,7 +344,105 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 	if err != nil {
 		return fmt.Errorf("watch: creating task for issue %d: %w", issue.ID, err)
 	}
-	return s.recordWatchTask(ctx, w.ID, issue.ID, task.ID)
+	if err := s.tasklinks.Set(ctx, task.ID, w.WorkspaceID, issue.ID, issue.URL); err != nil {
+		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: linking task %s: %w", task.ID, err))
+	}
+	if err := s.tasklinks.RecordAppliedTrackerLabel(ctx, task.ID, appliedTrackerLabel); err != nil {
+		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: recording tracker label for task %s: %w", task.ID, err))
+	}
+	if err := s.recordWatchTask(ctx, w.WorkspaceID, w.ID, issue.ID, task.ID); err != nil {
+		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: recording task %s: %w", task.ID, err))
+	}
+	return nil
+}
+
+func (w Watch) redmineFilters() map[string]string {
+	filters := make(map[string]string)
+	if w.TrackerID != nil {
+		filters["tracker_id"] = strconv.Itoa(*w.TrackerID)
+	}
+	if w.StatusID != nil {
+		filters["status_id"] = strconv.Itoa(*w.StatusID)
+	}
+	if w.PriorityID != nil {
+		filters["priority_id"] = strconv.Itoa(*w.PriorityID)
+	}
+	if w.AssigneeID != nil {
+		filters["assigned_to_id"] = strconv.Itoa(*w.AssigneeID)
+	}
+	if w.CategoryID != nil {
+		filters["category_id"] = strconv.Itoa(*w.CategoryID)
+	}
+	for id, value := range w.CustomFieldFilters {
+		if id > 0 && value != "" {
+			filters["cf_"+strconv.Itoa(id)] = value
+		}
+	}
+	return filters
+}
+
+func (w Watch) nativeFilters() []issues.NativeFilter {
+	filters := make([]issues.NativeFilter, 0, len(w.Filters))
+	for _, filter := range w.Filters {
+		filters = append(filters, issues.NativeFilter{Field: filter.Field, Operator: filter.Operator, Value: filter.Value})
+	}
+	return filters
+}
+
+func watcherTaskTitle(issueID int, subject string) string {
+	title := []rune(fmt.Sprintf("Redmine #%d: %s", issueID, subject))
+	if len(title) <= maxTaskTitleRunes {
+		return string(title)
+	}
+	return string(title[:maxTaskTitleRunes-1]) + "…"
+}
+
+func (s *Service) compensateCreatedTask(ctx context.Context, taskID string, cause error) error {
+	var cleanup error
+	if err := s.tasklinks.Unset(ctx, taskID); err != nil {
+		cleanup = errors.Join(cleanup, fmt.Errorf("compensating link removal: %w", err))
+	}
+	if manager, ok := pluginsdk.PluginOwnedTaskTrees(s.host); ok {
+		if _, err := manager.Delete(ctx, taskID); err != nil {
+			cleanup = errors.Join(cleanup, fmt.Errorf("compensating task delete: %w", err))
+		}
+	} else {
+		cleanup = errors.Join(cleanup, errors.New("compensating task delete: host lacks PluginOwnedTaskTrees"))
+	}
+	if cleanup != nil {
+		return errors.Join(cause, cleanup)
+	}
+	return cause
+}
+
+func (s *Service) deleteOwnedTaskAndLink(ctx context.Context, workspaceID, watchID, taskID string) error {
+	manager, ok := pluginsdk.PluginOwnedTaskTrees(s.host)
+	if !ok {
+		return errors.New("watch: host lacks PluginOwnedTaskTrees for cascade cleanup")
+	}
+	link, found, err := s.tasklinks.Get(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("watch: reading link for task %s: %w", taskID, err)
+	}
+	if found && link.WorkspaceID != workspaceID {
+		return fmt.Errorf("watch: refusing to cascade task %s with link owned by workspace %s", taskID, link.WorkspaceID)
+	}
+	task, err := s.host.Tasks().Get(ctx, taskID)
+	if err != nil && status.Code(err) != codes.NotFound {
+		return fmt.Errorf("watch: reading task %s before cascade: %w", taskID, err)
+	}
+	if err == nil && (task.WorkspaceID != workspaceID || taskPluginMetadata(task)[metadataKeyWatchID] != watchID) {
+		return fmt.Errorf("watch: refusing to cascade task %s outside workspace/watch ownership", taskID)
+	}
+	if _, err := manager.Delete(ctx, taskID); err != nil {
+		return fmt.Errorf("watch: cascading delete for task %s: %w", taskID, err)
+	}
+	if found {
+		if err := s.tasklinks.Unset(ctx, taskID); err != nil {
+			return fmt.Errorf("watch: removing link for task %s: %w", taskID, err)
+		}
+	}
+	return nil
 }
 
 // inflightCount counts this watch's created tasks that are not yet in a
@@ -193,7 +452,7 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 // authoritative per-watch task list; the metadata key is what a mismatch
 // bug would silently break — see the constant's doc comment).
 func (s *Service) inflightCount(ctx context.Context, w Watch) (int, error) {
-	tasks, err := s.watchTasks(ctx, w.ID)
+	tasks, err := s.watchTasks(ctx, w.WorkspaceID, w.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -201,9 +460,12 @@ func (s *Service) inflightCount(ctx context.Context, w Watch) (int, error) {
 	for _, taskID := range tasks {
 		task, err := s.host.Tasks().Get(ctx, taskID)
 		if err != nil {
-			continue // deleted/not found: does not count as inflight
+			if status.Code(err) == codes.NotFound {
+				continue // deleted task does not count as inflight
+			}
+			return 0, fmt.Errorf("watch: reading task %s for throttle: %w", taskID, err)
 		}
-		if task.Metadata[metadataKeyWatchID] != w.ID {
+		if taskPluginMetadata(task)[metadataKeyWatchID] != w.ID {
 			continue
 		}
 		if !terminalTaskStates[task.State] {
@@ -213,8 +475,21 @@ func (s *Service) inflightCount(ctx context.Context, w Watch) (int, error) {
 	return count, nil
 }
 
-func (s *Service) hasSeen(ctx context.Context, watchID string, issueID int) (bool, error) {
-	tasks, err := s.watchTasks(ctx, watchID)
+func taskPluginMetadata(task *pluginsdk.Task) map[string]any {
+	if task == nil {
+		return nil
+	}
+	if nested, ok := task.Metadata[pluginMetadataKey].(map[string]any); ok {
+		return nested
+	}
+	// Older test hosts and SDK candidates returned plugin-owned metadata
+	// already unwrapped. Retain the fallback so upgrading the host does not
+	// invalidate existing watcher ownership records.
+	return task.Metadata
+}
+
+func (s *Service) hasSeen(ctx context.Context, workspaceID, watchID string, issueID int) (bool, error) {
+	tasks, err := s.watchTasks(ctx, workspaceID, watchID)
 	if err != nil {
 		return false, err
 	}
@@ -222,8 +497,10 @@ func (s *Service) hasSeen(ctx context.Context, watchID string, issueID int) (boo
 	return ok, nil
 }
 
-func (s *Service) watchTasks(ctx context.Context, watchID string) (map[int]string, error) {
-	value, found, err := s.host.GetState(ctx, watchScope, watchID, tasksKey)
+func watchStateID(workspaceID, watchID string) string { return workspaceID + ":" + watchID }
+
+func (s *Service) watchTasks(ctx context.Context, workspaceID, watchID string) (map[int]string, error) {
+	value, found, err := s.host.GetState(ctx, watchScope, watchStateID(workspaceID, watchID), tasksKey)
 	if err != nil {
 		return nil, fmt.Errorf("watch: reading task index: %w", err)
 	}
@@ -244,8 +521,8 @@ func (s *Service) watchTasks(ctx context.Context, watchID string) (map[int]strin
 	return out, nil
 }
 
-func (s *Service) recordWatchTask(ctx context.Context, watchID string, issueID int, taskID string) error {
-	tasks, err := s.watchTasks(ctx, watchID)
+func (s *Service) recordWatchTask(ctx context.Context, workspaceID, watchID string, issueID int, taskID string) error {
+	tasks, err := s.watchTasks(ctx, workspaceID, watchID)
 	if err != nil {
 		return err
 	}
@@ -254,14 +531,14 @@ func (s *Service) recordWatchTask(ctx context.Context, watchID string, issueID i
 	for id, tID := range tasks {
 		values[strconv.Itoa(id)] = tID
 	}
-	if err := s.host.SetState(ctx, watchScope, watchID, tasksKey, map[string]any{"issue_id_to_task_id": values}); err != nil {
+	if err := s.host.SetState(ctx, watchScope, watchStateID(workspaceID, watchID), tasksKey, map[string]any{"issue_id_to_task_id": values}); err != nil {
 		return fmt.Errorf("watch: saving task index: %w", err)
 	}
 	return nil
 }
 
 func (s *Service) saveWatchInList(ctx context.Context, w Watch) error {
-	watches, err := s.ListWatches(ctx, w.WorkspaceID)
+	watches, err := s.listWatchesLocked(ctx, w.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -280,7 +557,7 @@ func (s *Service) saveWatchInList(ctx context.Context, w Watch) error {
 }
 
 func (s *Service) removeWatchFromList(ctx context.Context, workspaceID, watchID string) error {
-	watches, err := s.ListWatches(ctx, workspaceID)
+	watches, err := s.listWatchesLocked(ctx, workspaceID)
 	if err != nil {
 		return err
 	}
@@ -307,6 +584,8 @@ func (s *Service) saveWatchList(ctx context.Context, workspaceID string, watches
 func (w Watch) toMap() map[string]any {
 	m := map[string]any{
 		"id":                 w.ID,
+		"workflow_id":        w.WorkflowID,
+		"workflow_step_id":   w.WorkflowStepID,
 		"project_id":         w.ProjectID,
 		"max_inflight_tasks": w.MaxInflightTasks,
 		"enabled":            w.Enabled,
@@ -317,6 +596,31 @@ func (w Watch) toMap() map[string]any {
 	if w.StatusID != nil {
 		m["status_id"] = *w.StatusID
 	}
+	if w.PriorityID != nil {
+		m["priority_id"] = *w.PriorityID
+	}
+	if w.AssigneeID != nil {
+		m["assignee_id"] = *w.AssigneeID
+	}
+	if w.CategoryID != nil {
+		m["category_id"] = *w.CategoryID
+	}
+	if len(w.CustomFieldFilters) > 0 {
+		m["custom_field_filters"] = intStringMap(w.CustomFieldFilters)
+	}
+	if len(w.Filters) > 0 {
+		filters := make([]any, 0, len(w.Filters))
+		for _, filter := range w.Filters {
+			filters = append(filters, map[string]any{"field": filter.Field, "operator": filter.Operator, "value": filter.Value})
+		}
+		m["filters"] = filters
+	}
+	if len(w.TrackerLabels) > 0 {
+		m["tracker_labels"] = intStringMap(w.TrackerLabels)
+	}
+	if len(w.PriorityMappings) > 0 {
+		m["priority_mappings"] = intStringMap(w.PriorityMappings)
+	}
 	return m
 }
 
@@ -324,6 +628,12 @@ func watchFromMap(workspaceID string, m map[string]any) Watch {
 	w := Watch{WorkspaceID: workspaceID}
 	if v, ok := m["id"].(string); ok {
 		w.ID = v
+	}
+	if v, ok := m["workflow_id"].(string); ok {
+		w.WorkflowID = v
+	}
+	if v, ok := m["workflow_step_id"].(string); ok {
+		w.WorkflowStepID = v
 	}
 	if v, ok := m["project_id"].(float64); ok {
 		w.ProjectID = int(v)
@@ -334,6 +644,20 @@ func watchFromMap(workspaceID string, m map[string]any) Watch {
 	if v, ok := m["enabled"].(bool); ok {
 		w.Enabled = v
 	}
+	if raw, ok := m["filters"].([]any); ok {
+		for _, item := range raw {
+			filterMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			field, _ := filterMap["field"].(string)
+			operator, _ := filterMap["operator"].(string)
+			value, _ := filterMap["value"].(string)
+			if field != "" && operator != "" && value != "" {
+				w.Filters = append(w.Filters, Filter{Field: field, Operator: operator, Value: value})
+			}
+		}
+	}
 	if v, ok := m["tracker_id"].(float64); ok {
 		id := int(v)
 		w.TrackerID = &id
@@ -342,7 +666,44 @@ func watchFromMap(workspaceID string, m map[string]any) Watch {
 		id := int(v)
 		w.StatusID = &id
 	}
+	if v, ok := m["priority_id"].(float64); ok {
+		id := int(v)
+		w.PriorityID = &id
+	}
+	if v, ok := m["assignee_id"].(float64); ok {
+		id := int(v)
+		w.AssigneeID = &id
+	}
+	if v, ok := m["category_id"].(float64); ok {
+		id := int(v)
+		w.CategoryID = &id
+	}
+	w.CustomFieldFilters = stringMapToIntMap(m["custom_field_filters"])
+	w.TrackerLabels = stringMapToIntMap(m["tracker_labels"])
+	w.PriorityMappings = stringMapToIntMap(m["priority_mappings"])
 	return w
+}
+
+func intStringMap(input map[int]string) map[string]any {
+	out := make(map[string]any, len(input))
+	for id, value := range input {
+		out[strconv.Itoa(id)] = value
+	}
+	return out
+}
+
+func stringMapToIntMap(value any) map[int]string {
+	raw, _ := value.(map[string]any)
+	out := make(map[int]string, len(raw))
+	for id, mapped := range raw {
+		parsed, err := strconv.Atoi(id)
+		if err == nil {
+			if text, ok := mapped.(string); ok {
+				out[parsed] = text
+			}
+		}
+	}
+	return out
 }
 
 func newWatchID() (string, error) {

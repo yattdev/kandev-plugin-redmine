@@ -3,6 +3,7 @@ package tasklink
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
@@ -13,12 +14,13 @@ import (
 // for the JSON-round-trip rationale.
 type fakeHost struct {
 	pluginsdk.UnimplementedHostData
-	mu    sync.Mutex
-	state map[string]map[string]any
+	mu     sync.Mutex
+	state  map[string]map[string]any
+	setErr map[string]error
 }
 
 func newFakeHost() *fakeHost {
-	return &fakeHost{state: make(map[string]map[string]any)}
+	return &fakeHost{state: make(map[string]map[string]any), setErr: make(map[string]error)}
 }
 
 func key(scope, scopeID, k string) string { return scope + "/" + scopeID + "/" + k }
@@ -30,9 +32,19 @@ func (h *fakeHost) GetState(_ context.Context, scope, scopeID, k string) (map[st
 	return v, ok, nil
 }
 
+func (h *fakeHost) failNextSet(scope, scopeID, k string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.setErr[key(scope, scopeID, k)] = errors.New("state write failed")
+}
+
 func (h *fakeHost) SetState(_ context.Context, scope, scopeID, k string, value map[string]any) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if err := h.setErr[key(scope, scopeID, k)]; err != nil {
+		delete(h.setErr, key(scope, scopeID, k))
+		return err
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		panic(err)

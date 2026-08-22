@@ -21,11 +21,17 @@ type searchResponse struct {
 // SearchIssues queries Redmine's full-text search, restricted to issues, for
 // composer `#` mention candidates (internal/references' SearchEntityReferences).
 func (c *Client) SearchIssues(ctx context.Context, query string, limit int) ([]SearchResult, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, "/search.json", map[string]string{
-		"q":      query,
-		"issues": "1",
-		"limit":  strconv.Itoa(limit),
-	})
+	return c.SearchIssuesInProject(ctx, query, 0, limit)
+}
+
+func (c *Client) SearchIssuesInProject(ctx context.Context, query string, projectID, limit int) ([]SearchResult, error) {
+	queryValues := map[string]string{
+		"q": query, "issues": "1", "limit": strconv.Itoa(limit),
+	}
+	if projectID > 0 {
+		queryValues["project_id"] = strconv.Itoa(projectID)
+	}
+	req, err := c.newRequest(ctx, http.MethodGet, "/search.json", queryValues)
 	if err != nil {
 		return nil, err
 	}

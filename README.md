@@ -1,24 +1,32 @@
 # kandev-plugin-redmine
 
-A [kandev](https://github.com/kdlbs/kandev) **native-UI plugin** connecting a
+A Kandev **native-UI plugin** connecting a
 Redmine instance to kandev: link tasks to Redmine issues, sync status both
 ways, and watch for new issues. Bootstrapped from
-[`kandev-plugin-template`](https://github.com/kdlbs/kandev-plugin-template);
-see [`docs/specs/redmine-plugin/spec.md`](https://github.com/kdlbs/kandev/blob/main/docs/specs/redmine-plugin/spec.md)
-and [`docs/plans/redmine-plugin/plan.md`](https://github.com/kdlbs/kandev/blob/main/docs/plans/redmine-plugin/plan.md)
-in `kdlbs/kandev` for the full design and task breakdown.
+`kandev-plugin-template`; the authoritative plugin specification and
+verification trace is [docs/spec.md](docs/spec.md).
 
 - **Connection** — API-key auth (`X-Redmine-API-Key`) only, one connection per
   kandev workspace, validated against `GET /users/current.json`. The key is
-  encrypted with workspace-derived key material and stored under a
-  plugin-composed secret key (`redmine:<workspace_id>:api_key`), since the
-  host's `GetSecret`/`SetSecret` RPCs are namespaced only by plugin ID, not by
-  workspace.
+  passed as plaintext only to the SDK's host-managed encrypted secret store.
+  The plugin uses a dot-safe composed key (`redmine.<workspace_id>.api_key`).
+  Existing v0.1 plugin-encrypted values are dual-read and migrated on read;
+  new values never use plugin-side encryption.
+- **No Redmine administrator required** — a normal Redmine user API key is
+  sufficient. Project and issue lists contain only resources that user can
+  access. Issue creation, edits, and status write-back additionally require
+  the corresponding project-role permissions. If the admin-only custom-field
+  endpoint returns 403, fields are derived from issues visible to that user.
+- **Workspace enable switch** — each Kandev workspace can pause Redmine
+  polling and automatic write-back without deleting its connection, secret,
+  mappings, or watcher definitions.
 - **Own health polling** — no host `healthpoll` equivalent exists for plugins;
   this plugin runs its own ~90s jittered probe per connected workspace.
 - **Project and field mapping** — statuses, trackers, and priorities are always
-  fetched live from the instance and mapped to kandev workflow steps, labels,
-  and priorities; nothing is hardcoded.
+  fetched live from the instance. Users choose a workspace workflow, add only
+  the Redmine statuses they want to map, and select a Kandev step for each;
+  tracker labels and task priorities remain configurable and nothing is
+  hardcoded.
 - **Issue read/write** — always sends `status_id=*` (Redmine defaults to
   open-only), with attachments via the two-step upload-token flow.
 - **Task linking** — `registerTaskAction({placement:"link"})` +
@@ -31,7 +39,8 @@ in `kdlbs/kandev` for the full design and task breakdown.
   `reference_sources` with submit-time reauthorization.
 - **Issue watchers** — one kandev task per newly matching issue, deduplicated
   and throttled per watch (`maxInflightTasks`), cascade-deleted via
-  `PluginOwnedTaskTrees` when the watch or connection is removed.
+  `PluginOwnedTaskTrees` when the watch or connection is removed. Disconnect
+  before uninstalling: host uninstall has no pre-uninstall task-tree hook.
 - **Settings UI** — `registerIntegrationSettings` contributes a native
   connection form, project picker, field-mapping table, sync-option toggles,
   and watcher management, rendered inside the kandev SPA (not an iframe).
@@ -68,11 +77,10 @@ calls into this plugin from the outside.
 
 ## Minimum host version
 
-`manifest.yaml` declares `min_kandev_version: "0.88.0"` — the first release
-containing `kdlbs/kandev` PR #2117's generic plugin seams this plugin depends
-on (`registerIntegrationSettings`, `registerTaskAction({placement:"link"})`,
-`reference_sources`, the `PluginOwnedTaskTrees` RPCs). A release host compares
-this against its own version at install time and refuses an older one.
+The final `min_kandev_version` is intentionally deferred until the Kandev
+release containing the generic task priority/labels write contract is known.
+The plugin's candidate build is tested against that host change locally; do
+not treat the currently committed manifest floor as the release decision.
 
 It is **release-only by design**: a host built from a git checkout reports a
 git-describe version like `v0.87.1-27-g4705f1fd0`, which isn't a release
@@ -152,7 +160,18 @@ serves it directly. Edit the file and repackage — nothing else to run.
 make build               # go build -o bin/... ./server/...
 make test                # go test ./... -race
 make vet                 # go vet ./...
+make test-ui             # native settings/task-action UI contract tests
 make verify-package-host # validate a host-only tarball and checksums
+
+# Packaged UI smoke test against a disposable Kandev host:
+KANDEV_PLUGIN_E2E_URL=http://127.0.0.1:13081 make e2e
+
+# Full live-Redmine acceptance run (API keys are write-only environment input):
+KANDEV_PLUGIN_E2E_URL=http://127.0.0.1:13081 \
+KANDEV_REDMINE_E2E_BASE_URL=http://127.0.0.1:13080 \
+KANDEV_REDMINE_E2E_API_KEY='<first disposable key>' \
+KANDEV_REDMINE_E2E_ROTATED_API_KEY='<second disposable key>' \
+make e2e-live
 ```
 
 > Note: bare `go build ./server/...` (no `-o`) fails with `build output
@@ -171,10 +190,11 @@ make package-host   # host platform only — faster local iteration
 make verify-package # build + validate the five-platform archive
 ```
 
-Both stage `manifest.yaml` + `ui/` alongside the freshly built
+Both stage `manifest.yaml` + the production `ui/bundle.js` alongside the freshly built
 `server/plugin-<goos>-<goarch>[.exe]` binaries, then pack the tree with
 kandev's `cmd/plugin-pack`, which computes `checksums.txt` and writes the
-tarball.
+tarball. UI tests and Playwright sources are deliberately excluded from the
+runtime archive.
 
 Note the Makefile runs `plugin-pack` with `cd $(KANDEV_SDK) && go run
 ./cmd/plugin-pack`, from inside the sibling kandev checkout, rather than as
@@ -192,7 +212,7 @@ Either through the UI (**Settings > Plugins > Install plugin**, URL or file
 upload), or directly:
 
 ```sh
-curl -F package=@kandev-plugin-redmine-0.1.0.tar.gz \
+curl -F package=@kandev-plugin-redmine-0.2.0.tar.gz \
   http://localhost:<kandev-port>/api/plugins/install
 ```
 
@@ -219,8 +239,8 @@ install pipeline expects:
 
 ```sh
 # bump VERSION in Makefile + version in manifest.yaml first, then:
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The workflows check out the kandev monorepo as a sibling so the local Go SDK

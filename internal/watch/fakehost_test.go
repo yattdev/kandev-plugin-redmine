@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"sync"
 
+	"kandev-plugin-redmine/internal/tasklink"
+
 	"github.com/kandev/kandev/pkg/pluginsdk"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // fakeHost is an in-memory pluginsdk.Host test double with a capturing,
@@ -15,22 +19,39 @@ import (
 type fakeHost struct {
 	pluginsdk.UnimplementedHostData
 
-	mu      sync.Mutex
-	state   map[string]map[string]any
-	tasks   map[string]*pluginsdk.Task
-	nextID  int
-	deleted []string
+	mu             sync.Mutex
+	state          map[string]map[string]any
+	tasks          map[string]*pluginsdk.Task
+	nextID         int
+	deleted        []string
+	creates        []pluginsdk.CreateTaskInput
+	getStateErr    error
+	setStateErr    error
+	setStateCalls  int
+	failSetStateAt int
+	getTaskErr     error
 }
 
 func newFakeHost() *fakeHost {
 	return &fakeHost{state: make(map[string]map[string]any), tasks: make(map[string]*pluginsdk.Task)}
 }
 
+func newWatchService(host *fakeHost) *Service {
+	return New(host, tasklink.New(host))
+}
+
+// hostWithoutTaskTrees forwards the regular Host contract but deliberately
+// does not expose PluginOwnedTaskTrees, for fail-closed cleanup tests.
+type hostWithoutTaskTrees struct{ pluginsdk.Host }
+
 func key(scope, scopeID, k string) string { return scope + "/" + scopeID + "/" + k }
 
 func (h *fakeHost) GetState(_ context.Context, scope, scopeID, k string) (map[string]any, bool, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.getStateErr != nil {
+		return nil, false, h.getStateErr
+	}
 	v, ok := h.state[key(scope, scopeID, k)]
 	return v, ok, nil
 }
@@ -38,6 +59,15 @@ func (h *fakeHost) GetState(_ context.Context, scope, scopeID, k string) (map[st
 func (h *fakeHost) SetState(_ context.Context, scope, scopeID, k string, value map[string]any) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.setStateCalls++
+	if h.failSetStateAt > 0 && h.setStateCalls == h.failSetStateAt {
+		return fmt.Errorf("injected state failure")
+	}
+	if h.setStateErr != nil {
+		err := h.setStateErr
+		h.setStateErr = nil
+		return err
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		panic(err)
@@ -102,9 +132,11 @@ func (r fakeTaskReader) Create(_ context.Context, in pluginsdk.CreateTaskInput) 
 	r.host.mu.Lock()
 	defer r.host.mu.Unlock()
 	r.host.nextID++
+	r.host.creates = append(r.host.creates, in)
 	task := &pluginsdk.Task{
 		ID: fmt.Sprintf("task-%d", r.host.nextID), WorkspaceID: in.WorkspaceID,
-		Title: in.Title, Description: in.Description, State: "RUNNING", Metadata: in.Metadata,
+		Title: in.Title, Description: in.Description, State: "RUNNING", Priority: in.Priority, Labels: in.Labels,
+		Metadata: map[string]any{pluginMetadataKey: in.Metadata, "source": pluginMetadataKey},
 	}
 	r.host.tasks[task.ID] = task
 	return task, nil
@@ -113,9 +145,12 @@ func (r fakeTaskReader) Create(_ context.Context, in pluginsdk.CreateTaskInput) 
 func (r fakeTaskReader) Get(_ context.Context, id string) (*pluginsdk.Task, error) {
 	r.host.mu.Lock()
 	defer r.host.mu.Unlock()
+	if r.host.getTaskErr != nil {
+		return nil, r.host.getTaskErr
+	}
 	task, ok := r.host.tasks[id]
 	if !ok {
-		return nil, fmt.Errorf("fakeHost: task %s not found", id)
+		return nil, status.Errorf(codes.NotFound, "fakeHost: task %s not found", id)
 	}
 	copyTask := *task
 	return &copyTask, nil

@@ -1,14 +1,8 @@
-// Package secretcrypto encrypts the Redmine API key with workspace-derived
-// key material before it is handed to the host's SetSecret RPC. The host's
-// plugin secret store is namespaced only by plugin ID
-// (plugin:<id>:secret:<key>), not by workspace, so internal/connection
-// composes the workspace ID into the secret *key* itself
-// (see internal/connection.secretKey) — that alone is a naming convention,
-// not isolation. This package adds the actual isolation: decrypting under
-// the wrong workspace ID fails closed (AEAD authentication failure) instead
-// of silently returning another workspace's key, converting a
-// key-composition bug elsewhere in the plugin from a credential leak into a
-// loud error (see docs/plans/redmine-plugin/plan.md "Risks").
+// Package secretcrypto decodes deprecated v0.1 plugin-side envelopes solely
+// for migration. It is not a security boundary: workspace IDs are identifiers,
+// not secret key material. New API keys cross the plugin boundary only through
+// the SDK's host-managed encrypted secret store; host-verified workspace
+// context and dot-safe secret-key composition provide scoping.
 package secretcrypto
 
 import (
@@ -24,11 +18,9 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// hkdfInfo/hkdfSalt are fixed, non-secret domain-separation constants. They
-// do not by themselves make the derived key secret — that comes from the
-// workspace ID being an unguessable UUID plus the host's own encryption of
-// SetSecret values at rest (internal/plugins/host.go). This layer's job is
-// isolation, not primary confidentiality: see the package doc comment.
+// hkdfInfo/hkdfSalt identify only the legacy v0.1 envelope format. They do
+// not make a workspace-ID-derived key confidential and must not be reused for
+// new secret storage.
 const hkdfInfo = "kandev-plugin-redmine/api-key/v1"
 
 var hkdfSalt = []byte("kandev-plugin-redmine/workspace-secret-salt/v1")
@@ -61,7 +53,8 @@ func newGCM(workspaceID string) (cipher.AEAD, error) {
 	return gcm, nil
 }
 
-// Encrypt returns plaintext encrypted under a key derived from workspaceID,
+// Encrypt returns plaintext encrypted under a key derived from workspaceID.
+// Deprecated: only legacy migration tests should call this.
 // base64-encoded (nonce prepended). Two calls with identical inputs produce
 // different output (random nonce per call).
 func Encrypt(workspaceID, plaintext string) (string, error) {
@@ -77,7 +70,7 @@ func Encrypt(workspaceID, plaintext string) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// Decrypt reverses Encrypt. It fails if workspaceID does not match the one
+// Decrypt reverses the legacy Encrypt format. It fails if workspaceID does not match the one
 // Encrypt was called with, or if encoded was tampered with.
 func Decrypt(workspaceID, encoded string) (string, error) {
 	gcm, err := newGCM(workspaceID)

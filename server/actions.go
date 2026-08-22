@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
+	"kandev-plugin-redmine/internal/connection"
 	"kandev-plugin-redmine/internal/fieldmapping"
 	"kandev-plugin-redmine/internal/issues"
 	"kandev-plugin-redmine/internal/redmineclient"
@@ -41,6 +44,10 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleConnectionSave(ctx, req)
 	case "connection.disconnect":
 		return p.handleConnectionDisconnect(ctx, req)
+	case "integration.enabled.get":
+		return p.handleIntegrationEnabledGet(ctx, req)
+	case "integration.enabled.save":
+		return p.handleIntegrationEnabledSave(ctx, req)
 	case "projects.list":
 		return p.handleProjectsList(ctx, req)
 	case "projects.save":
@@ -53,6 +60,14 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleFieldMappingSave(ctx, req)
 	case "syncoptions.save":
 		return p.handleSyncOptionsSave(ctx, req)
+	case "syncoptions.get":
+		return p.handleSyncOptionsGet(ctx, req)
+	case "issues.create":
+		return p.handleIssueCreate(ctx, req)
+	case "issues.update":
+		return p.handleIssueUpdate(ctx, req)
+	case "issues.upload":
+		return p.handleIssueUpload(ctx, req)
 	case "link.get":
 		return p.handleLinkGet(ctx, req)
 	case "link.set":
@@ -63,15 +78,42 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleLinkSetStatus(ctx, req)
 	case "watches.list":
 		return p.handleWatchesList(ctx, req)
+	case "watches.filter_options":
+		return p.handleWatchFilterOptions(ctx, req)
 	case "watches.create":
 		return p.handleWatchesCreate(ctx, req)
 	case "watches.update":
 		return p.handleWatchesUpdate(ctx, req)
 	case "watches.delete":
 		return p.handleWatchesDelete(ctx, req)
+	case "watches.poll":
+		return p.handleWatchesPoll(ctx, req)
 	default:
 		return nil, fmt.Errorf("redmine: unknown action %q", req.ActionKey)
 	}
+}
+
+type integrationEnabledResponse struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (p *redminePlugin) handleIntegrationEnabledGet(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	enabled, err := p.connectionSvc.GetEnabled(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResponse(integrationEnabledResponse{Enabled: enabled})
+}
+
+func (p *redminePlugin) handleIntegrationEnabledSave(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	body, err := decodeBody[integrationEnabledResponse](req)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.connectionSvc.SetEnabled(ctx, req.Context.WorkspaceID, body.Enabled); err != nil {
+		return nil, err
+	}
+	return jsonResponse(body)
 }
 
 func jsonResponse(v any) (*pluginsdk.PluginActionResponse, error) {
@@ -146,7 +188,12 @@ func (p *redminePlugin) handleConnectionSave(ctx context.Context, req *pluginsdk
 	if err != nil {
 		return nil, err
 	}
-	record, err := p.connectionSvc.Connect(ctx, req.Context.WorkspaceID, body.BaseURL, body.APIKey)
+	var record *connection.Record
+	if body.APIKey == "" {
+		record, err = p.connectionSvc.ConnectWithExistingKey(ctx, req.Context.WorkspaceID, body.BaseURL)
+	} else {
+		record, err = p.connectionSvc.Connect(ctx, req.Context.WorkspaceID, body.BaseURL, body.APIKey)
+	}
 	if err != nil {
 		return classifiedErrorResponse(err)
 	}
@@ -158,16 +205,7 @@ func (p *redminePlugin) handleConnectionSave(ctx context.Context, req *pluginsdk
 // removing the connection itself, so deleting a connection never leaves
 // orphaned watcher tasks behind (spec "Failure modes").
 func (p *redminePlugin) handleConnectionDisconnect(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
-	watches, err := p.watchSvc.ListWatches(ctx, req.Context.WorkspaceID)
-	if err != nil {
-		return nil, err
-	}
-	for _, w := range watches {
-		if err := p.watchSvc.DeleteWatch(ctx, req.Context.WorkspaceID, w.ID); err != nil {
-			return nil, err
-		}
-	}
-	if err := p.connectionSvc.Disconnect(ctx, req.Context.WorkspaceID); err != nil {
+	if err := p.clearWorkspace(ctx, req.Context.WorkspaceID, false); err != nil {
 		return nil, err
 	}
 	return jsonResponse(map[string]bool{"disconnected": true})
@@ -215,7 +253,31 @@ func (p *redminePlugin) handleProjectsSave(ctx context.Context, req *pluginsdk.P
 	if err != nil {
 		return nil, err
 	}
-	if err := p.projectsSvc.SaveSelection(ctx, req.Context.WorkspaceID, body.ProjectIDs); err != nil {
+	client, err := p.connectionSvc.Client(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return classifiedErrorResponse(err)
+	}
+	live, err := p.projectsSvc.ListLive(ctx, client)
+	if err != nil {
+		return classifiedErrorResponse(err)
+	}
+	visible := make(map[int]bool, len(live))
+	for _, project := range live {
+		visible[project.ID] = true
+	}
+	selected := make([]int, 0, len(body.ProjectIDs))
+	seen := make(map[int]bool, len(body.ProjectIDs))
+	for _, id := range body.ProjectIDs {
+		if id <= 0 || !visible[id] {
+			return classifiedErrorResponse(fmt.Errorf("redmine: selected project %d is not visible", id))
+		}
+		if !seen[id] {
+			selected = append(selected, id)
+			seen[id] = true
+		}
+	}
+	sort.Ints(selected)
+	if err := p.projectsSvc.SaveSelection(ctx, req.Context.WorkspaceID, selected); err != nil {
 		return nil, err
 	}
 	return jsonResponse(map[string]bool{"saved": true})
@@ -224,6 +286,7 @@ func (p *redminePlugin) handleProjectsSave(ctx context.Context, req *pluginsdk.P
 // --- fieldmapping.* -------------------------------------------------------
 
 type fieldMappingGetResponse struct {
+	WorkflowID          string                         `json:"workflow_id"`
 	Statuses            []fieldmapping.StatusMapping   `json:"statuses"`
 	Trackers            []fieldmapping.TrackerMapping  `json:"trackers"`
 	Priorities          []fieldmapping.PriorityMapping `json:"priorities"`
@@ -270,7 +333,8 @@ func (p *redminePlugin) handleFieldMappingGet(ctx context.Context, req *pluginsd
 	}
 
 	return jsonResponse(fieldMappingGetResponse{
-		Statuses: mapping.Statuses, Trackers: mapping.Trackers, Priorities: mapping.Priorities,
+		WorkflowID: mapping.WorkflowID,
+		Statuses:   mapping.Statuses, Trackers: mapping.Trackers, Priorities: mapping.Priorities,
 		LiveStatuses:        toNamedRefs(liveStatuses),
 		LiveTrackers:        toTrackerRefs(liveTrackers),
 		LivePriorities:      toPriorityRefs(livePriorities),
@@ -293,7 +357,7 @@ func (p *redminePlugin) resolveCustomFields(ctx context.Context, client *redmine
 		return out, false, nil
 	}
 	apiErr, ok := asAPIError(err)
-	if !ok || apiErr.Kind != redmineclient.ErrKindAPIDisabled {
+	if !ok || apiErr.Kind != redmineclient.ErrKindPermissionDenied {
 		return nil, false, err
 	}
 
@@ -306,7 +370,7 @@ func (p *redminePlugin) resolveCustomFields(ctx context.Context, client *redmine
 	for i, issue := range result.Issues {
 		fields := make([]fieldmapping.CustomField, len(issue.CustomFields))
 		for j, f := range issue.CustomFields {
-			fields[j] = fieldmapping.CustomField{ID: f.ID}
+			fields[j] = fieldmapping.CustomField{ID: f.ID, Name: f.Name}
 		}
 		perIssue[i] = fields
 	}
@@ -318,13 +382,126 @@ func (p *redminePlugin) handleFieldMappingSave(ctx context.Context, req *plugins
 	if err != nil {
 		return nil, err
 	}
+	if err := p.validateMappingWorkflow(ctx, req.Context.WorkspaceID, body); err != nil {
+		return classifiedErrorResponse(err)
+	}
+	client, err := p.connectionSvc.Client(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return classifiedErrorResponse(err)
+	}
+	if err := p.normalizeAndValidateMapping(ctx, client, &body); err != nil {
+		return classifiedErrorResponse(err)
+	}
 	if err := p.fieldmappingSvc.Save(ctx, req.Context.WorkspaceID, body); err != nil {
 		return nil, err
 	}
 	return jsonResponse(map[string]bool{"saved": true})
 }
 
+func (p *redminePlugin) normalizeAndValidateMapping(ctx context.Context, client *redmineclient.Client, mapping *fieldmapping.Mapping) error {
+	statuses, err := client.ListIssueStatuses(ctx)
+	if err != nil {
+		return err
+	}
+	trackers, err := client.ListTrackers(ctx)
+	if err != nil {
+		return err
+	}
+	priorities, err := client.ListIssuePriorities(ctx)
+	if err != nil {
+		return err
+	}
+	statusByID := make(map[int]redmineclient.IssueStatus, len(statuses))
+	for _, value := range statuses {
+		statusByID[value.ID] = value
+	}
+	trackerByID := make(map[int]redmineclient.Tracker, len(trackers))
+	for _, value := range trackers {
+		trackerByID[value.ID] = value
+	}
+	priorityByID := make(map[int]redmineclient.Priority, len(priorities))
+	for _, value := range priorities {
+		priorityByID[value.ID] = value
+	}
+	seenStatuses, seenTrackers, seenPriorities := map[int]bool{}, map[int]bool{}, map[int]bool{}
+	for i := range mapping.Statuses {
+		item := &mapping.Statuses[i]
+		live, ok := statusByID[item.RedmineStatusID]
+		if item.RedmineStatusID <= 0 || !ok || seenStatuses[item.RedmineStatusID] {
+			return fmt.Errorf("redmine: status mapping id %d is invalid or duplicated", item.RedmineStatusID)
+		}
+		seenStatuses[item.RedmineStatusID] = true
+		item.RedmineName = live.Name
+		item.IsClosed = live.IsClosed
+	}
+	for i := range mapping.Trackers {
+		item := &mapping.Trackers[i]
+		live, ok := trackerByID[item.RedmineTrackerID]
+		if item.RedmineTrackerID <= 0 || !ok || seenTrackers[item.RedmineTrackerID] {
+			return fmt.Errorf("redmine: tracker mapping id %d is invalid or duplicated", item.RedmineTrackerID)
+		}
+		seenTrackers[item.RedmineTrackerID] = true
+		item.RedmineName = live.Name
+		item.TaskLabel = strings.TrimSpace(item.TaskLabel)
+	}
+	for i := range mapping.Priorities {
+		item := &mapping.Priorities[i]
+		live, ok := priorityByID[item.RedminePriorityID]
+		if item.RedminePriorityID <= 0 || !ok || seenPriorities[item.RedminePriorityID] {
+			return fmt.Errorf("redmine: priority mapping id %d is invalid or duplicated", item.RedminePriorityID)
+		}
+		if item.TaskPriority != "" && item.TaskPriority != "critical" && item.TaskPriority != "high" && item.TaskPriority != "medium" && item.TaskPriority != "low" {
+			return fmt.Errorf("redmine: task priority %q is invalid", item.TaskPriority)
+		}
+		seenPriorities[item.RedminePriorityID] = true
+		item.RedmineName = live.Name
+	}
+	return nil
+}
+
+func (p *redminePlugin) validateMappingWorkflow(ctx context.Context, workspaceID string, mapping fieldmapping.Mapping) error {
+	if mapping.WorkflowID == "" {
+		return fmt.Errorf("redmine: workflow_id is required")
+	}
+	workflows, _, err := p.Host().Workflows().List(ctx, workspaceID, pluginsdk.Page{})
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, workflow := range workflows {
+		if workflow.ID == mapping.WorkflowID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("redmine: workflow %s does not belong to this workspace", mapping.WorkflowID)
+	}
+	steps, err := p.Host().Workflows().ListSteps(ctx, mapping.WorkflowID)
+	if err != nil {
+		return err
+	}
+	valid := make(map[string]bool, len(steps))
+	for _, step := range steps {
+		valid[step.ID] = true
+	}
+	for _, status := range mapping.Statuses {
+		if status.WorkflowStepID != "" && !valid[status.WorkflowStepID] {
+			return fmt.Errorf("redmine: workflow step %s is not in workflow %s", status.WorkflowStepID, mapping.WorkflowID)
+		}
+	}
+	return nil
+}
+
 // --- syncoptions.* --------------------------------------------------------
+
+func (p *redminePlugin) handleSyncOptionsGet(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	opts, err := p.syncSvc.GetOptions(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResponse(map[string]bool{"auto_status_writeback": opts.AutoStatusWriteback, "sync_title_description": opts.SyncTitleDescription})
+}
 
 func (p *redminePlugin) handleSyncOptionsSave(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
 	body, err := decodeBody[syncOptionsSaveRequest](req)
