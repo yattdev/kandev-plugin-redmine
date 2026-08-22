@@ -49,17 +49,26 @@ workspace's state.
 7. Apply mapped inbound status updates; optionally synchronize title and
    description. A plugin-originated outbound status must not bounce back as an
    inbound task transition.
-8. Write a mapped status on `task.moved` only when automatic write-back is
+8. Apply configured tracker and priority mappings both at watcher task
+   creation (initial labels and priority) and during inbound synchronization
+   of already-linked tasks. The inbound reconciliation preserves user-set
+   labels in exact order and content: it removes only the plugin-owned
+   tracker label recorded on the link, and adds the currently mapped one. The
+   plugin-owned label marker is persisted only after a successful task
+   update, or repaired in place when the task already reflects the desired
+   label but the marker is stale. An empty or unassigned tracker mapping
+   removes only the previously owned tracker label.
+9. Write a mapped status on `task.moved` only when automatic write-back is
    enabled. Manual write-back remains available when it is disabled.
-9. Search Redmine issues in the composer and reauthorize a selected reference
-   immediately before submission.
-10. Create watcher tasks once per matching issue, automatically link them to
+10. Search Redmine issues in the composer and reauthorize a selected reference
+    immediately before submission.
+11. Create watcher tasks once per matching issue, automatically link them to
     the originating Redmine issue, deduplicate them, enforce the configured
     inflight cap, and delete owned task trees when a watch or its connection
     is removed. Disconnect before uninstall: host uninstall stops
     the plugin and purges its state/secrets, but has no pre-uninstall hook to
     delete plugin-owned task trees.
-11. Preserve state on Redmine failures, retry with bounded backoff, show
+12. Preserve state on Redmine failures, retry with bounded backoff, show
     degraded health, and resume cleanly after reconnecting or re-enabling the
     plugin.
 
