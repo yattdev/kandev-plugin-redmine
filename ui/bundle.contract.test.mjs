@@ -38,6 +38,13 @@ test("watcher filters use Kandev Select controls and nonempty optional sentinels
   assert.doesNotMatch(bundle, /h\("select", \{ id: "redmine-new-watch-/);
 });
 
+test("watcher configuration loads refreshable live project filters", () => {
+  for (const id of ["redmine-watch-filters", "redmine-watch-filters-refresh", "redmine-watch-priority", "redmine-watch-assignee", "redmine-watch-category", "redmine-watch-custom-field-add"]) assert.match(bundle, new RegExp(id));
+  assert.match(bundle, /watches\.filter_options/);
+  assert.match(bundle, /custom_field_filters: customFilters/);
+  assert.match(bundle, /Live options are scoped to the selected project/);
+});
+
 test("project selection uses a dropdown with removable selected projects", () => {
   assert.match(bundle, /redmine-project-select/);
   assert.match(bundle, /redmine-selected-projects/);

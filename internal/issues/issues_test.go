@@ -36,6 +36,24 @@ func TestListIssues_AlwaysSendsStatusIDWildcard(t *testing.T) {
 	require.Equal(t, "*", sawStatusID)
 }
 
+func TestListIssues_SendsValidatedWatchFilters(t *testing.T) {
+	var query map[string]string
+	svc := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		query = map[string]string{}
+		for key, values := range r.URL.Query() {
+			query[key] = values[0]
+		}
+		_, _ = w.Write([]byte(`{"issues":[],"total_count":0}`))
+	})
+	_, err := svc.ListIssues(context.Background(), issues.ListIssuesParams{ProjectID: "7", Filters: map[string]string{"priority_id": "4", "assigned_to_id": "12", "category_id": "8", "cf_3": "Gold"}})
+	require.NoError(t, err)
+	require.Equal(t, "7", query["project_id"])
+	require.Equal(t, "4", query["priority_id"])
+	require.Equal(t, "12", query["assigned_to_id"])
+	require.Equal(t, "8", query["category_id"])
+	require.Equal(t, "Gold", query["cf_3"])
+}
+
 func TestListIssues_ClosedIssueIncludedInResults(t *testing.T) {
 	svc := newService(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -78,6 +78,8 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleLinkSetStatus(ctx, req)
 	case "watches.list":
 		return p.handleWatchesList(ctx, req)
+	case "watches.filter_options":
+		return p.handleWatchFilterOptions(ctx, req)
 	case "watches.create":
 		return p.handleWatchesCreate(ctx, req)
 	case "watches.update":

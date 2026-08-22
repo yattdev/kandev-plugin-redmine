@@ -91,6 +91,7 @@ actions:
   - { key: "link.unset", scope: "task", max_body_bytes: 8192 }
   - { key: "link.set_status", scope: "task", max_body_bytes: 8192 }
   - { key: "watches.list", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "watches.filter_options", scope: "workspace", max_body_bytes: 8192 }
   - { key: "watches.create", scope: "workspace", max_body_bytes: 32768 }
   - { key: "watches.update", scope: "workspace", max_body_bytes: 32768 }
   - { key: "watches.delete", scope: "workspace", max_body_bytes: 8192 }

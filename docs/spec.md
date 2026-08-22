@@ -64,8 +64,10 @@ workspace's state.
     immediately before submission.
 11. Create watcher tasks once per matching issue, automatically link them to
     the originating Redmine issue, deduplicate them, enforce the configured
-    inflight cap, and delete owned task trees when a watch or its connection
-    is removed. Disconnect before uninstall: host uninstall stops
+    inflight cap, and scope live tracker/status/priority/assignee/category and
+    custom-field filters to each selected Redmine project. Refresh those live
+    choices from Redmine before saving. Delete owned task trees when a watch
+    or its connection is removed. Disconnect before uninstall: host uninstall stops
     the plugin and purges its state/secrets, but has no pre-uninstall hook to
     delete plugin-owned task trees.
 12. Preserve state on Redmine failures, retry with bounded backoff, show

@@ -42,17 +42,24 @@ var terminalTaskStates = map[string]bool{"COMPLETED": true, "FAILED": true, "CAN
 
 // Watch is one structured issue-watch definition.
 type Watch struct {
-	ID               string
-	WorkspaceID      string
-	WorkflowID       string
-	WorkflowStepID   string
-	ProjectID        int
-	TrackerID        *int
-	StatusID         *int
-	TrackerLabels    map[int]string
-	PriorityMappings map[int]string
-	MaxInflightTasks int // 0 = unlimited
-	Enabled          bool
+	ID             string
+	WorkspaceID    string
+	WorkflowID     string
+	WorkflowStepID string
+	ProjectID      int
+	TrackerID      *int
+	StatusID       *int
+	PriorityID     *int
+	AssigneeID     *int
+	CategoryID     *int
+	// CustomFieldFilters is keyed by Redmine custom-field ID. Values are the
+	// live choices selected in the settings UI and are sent as cf_<id> query
+	// filters to Redmine.
+	CustomFieldFilters map[int]string
+	TrackerLabels      map[int]string
+	PriorityMappings   map[int]string
+	MaxInflightTasks   int // 0 = unlimited
+	Enabled            bool
 }
 
 func (w Watch) matches(issue issues.Issue) bool {
@@ -61,6 +68,27 @@ func (w Watch) matches(issue issues.Issue) bool {
 	}
 	if w.StatusID != nil && *w.StatusID != issue.StatusID {
 		return false
+	}
+	if w.PriorityID != nil && *w.PriorityID != issue.PriorityID {
+		return false
+	}
+	if w.AssigneeID != nil && *w.AssigneeID != issue.AssigneeID {
+		return false
+	}
+	if w.CategoryID != nil && *w.CategoryID != issue.CategoryID {
+		return false
+	}
+	for id, want := range w.CustomFieldFilters {
+		matched := false
+		for _, field := range issue.CustomFields {
+			if field.ID == id && fmt.Sprint(field.Value) == want {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 	return true
 }
@@ -229,7 +257,7 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 	}
 
 	for offset := 0; ; {
-		result, err := issuesSvc.ListIssues(ctx, issues.ListIssuesParams{ProjectID: strconv.Itoa(w.ProjectID), Offset: offset, Limit: 100})
+		result, err := issuesSvc.ListIssues(ctx, issues.ListIssuesParams{ProjectID: strconv.Itoa(w.ProjectID), Filters: w.redmineFilters(), Offset: offset, Limit: 100})
 		if err != nil {
 			return err
 		}
@@ -315,6 +343,31 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: recording task %s: %w", task.ID, err))
 	}
 	return nil
+}
+
+func (w Watch) redmineFilters() map[string]string {
+	filters := make(map[string]string)
+	if w.TrackerID != nil {
+		filters["tracker_id"] = strconv.Itoa(*w.TrackerID)
+	}
+	if w.StatusID != nil {
+		filters["status_id"] = strconv.Itoa(*w.StatusID)
+	}
+	if w.PriorityID != nil {
+		filters["priority_id"] = strconv.Itoa(*w.PriorityID)
+	}
+	if w.AssigneeID != nil {
+		filters["assigned_to_id"] = strconv.Itoa(*w.AssigneeID)
+	}
+	if w.CategoryID != nil {
+		filters["category_id"] = strconv.Itoa(*w.CategoryID)
+	}
+	for id, value := range w.CustomFieldFilters {
+		if id > 0 && value != "" {
+			filters["cf_"+strconv.Itoa(id)] = value
+		}
+	}
+	return filters
 }
 
 func watcherTaskTitle(issueID int, subject string) string {
@@ -524,6 +577,18 @@ func (w Watch) toMap() map[string]any {
 	if w.StatusID != nil {
 		m["status_id"] = *w.StatusID
 	}
+	if w.PriorityID != nil {
+		m["priority_id"] = *w.PriorityID
+	}
+	if w.AssigneeID != nil {
+		m["assignee_id"] = *w.AssigneeID
+	}
+	if w.CategoryID != nil {
+		m["category_id"] = *w.CategoryID
+	}
+	if len(w.CustomFieldFilters) > 0 {
+		m["custom_field_filters"] = intStringMap(w.CustomFieldFilters)
+	}
 	if len(w.TrackerLabels) > 0 {
 		m["tracker_labels"] = intStringMap(w.TrackerLabels)
 	}
@@ -561,6 +626,19 @@ func watchFromMap(workspaceID string, m map[string]any) Watch {
 		id := int(v)
 		w.StatusID = &id
 	}
+	if v, ok := m["priority_id"].(float64); ok {
+		id := int(v)
+		w.PriorityID = &id
+	}
+	if v, ok := m["assignee_id"].(float64); ok {
+		id := int(v)
+		w.AssigneeID = &id
+	}
+	if v, ok := m["category_id"].(float64); ok {
+		id := int(v)
+		w.CategoryID = &id
+	}
+	w.CustomFieldFilters = stringMapToIntMap(m["custom_field_filters"])
 	w.TrackerLabels = stringMapToIntMap(m["tracker_labels"])
 	w.PriorityMappings = stringMapToIntMap(m["priority_mappings"])
 	return w

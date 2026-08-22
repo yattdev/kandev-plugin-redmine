@@ -808,9 +808,16 @@ function makeSettingsComponent(host) {
     const [projects, setProjects] = React.useState([]);
     const [trackers, setTrackers] = React.useState([]);
     const [statuses, setStatuses] = React.useState([]);
+    const [filterOptions, setFilterOptions] = React.useState({ priorities: [], assignees: [], categories: [], custom_field_values: {}, custom_fields: [] });
     const [newProjectId, setNewProjectId] = React.useState("");
     const [newTrackerId, setNewTrackerId] = React.useState("");
     const [newStatusId, setNewStatusId] = React.useState("");
+    const [newPriorityId, setNewPriorityId] = React.useState("");
+    const [newAssigneeId, setNewAssigneeId] = React.useState("");
+    const [newCategoryId, setNewCategoryId] = React.useState("");
+    const [customFilters, setCustomFilters] = React.useState({});
+    const [customFieldToAdd, setCustomFieldToAdd] = React.useState("");
+    const [refreshingFilters, setRefreshingFilters] = React.useState(false);
     const [newMaxInflight, setNewMaxInflight] = React.useState("");
     const [creating, setCreating] = React.useState(false);
     const [busyWatchIDs, setBusyWatchIDs] = React.useState(new Set());
@@ -841,6 +848,26 @@ function makeSettingsComponent(host) {
       load();
     }, [load]);
 
+    const refreshFilterOptions = async (projectID = newProjectId) => {
+      const id = Number(projectID);
+      if (!Number.isSafeInteger(id) || id <= 0) return;
+      setRefreshingFilters(true);
+      try {
+        const options = await invoke("watches.filter_options", workspaceId, { project_id: id });
+        setFilterOptions(options || { priorities: [], assignees: [], categories: [], custom_field_values: {}, custom_fields: [] });
+      } catch (err) {
+        toast.error(errorMessage(err));
+      } finally { setRefreshingFilters(false); }
+    };
+
+    const selectProject = (value) => {
+      const projectID = value === "__select_project__" ? "" : value;
+      setNewProjectId(projectID);
+      setNewTrackerId(""); setNewStatusId(""); setNewPriorityId(""); setNewAssigneeId(""); setNewCategoryId(""); setCustomFilters({}); setCustomFieldToAdd("");
+      setFilterOptions({ priorities: [], assignees: [], categories: [], custom_field_values: {}, custom_fields: [] });
+      if (projectID) void refreshFilterOptions(projectID);
+    };
+
     if (!connected) return null;
     if (loading) return h(Spinner, { id: "redmine-watchers-loading" });
 
@@ -861,6 +888,12 @@ function makeSettingsComponent(host) {
         toast.error("Select a valid status.");
         return;
       }
+      const priorityId = newPriorityId === "" ? null : Number(newPriorityId);
+      const assigneeId = newAssigneeId === "" ? null : Number(newAssigneeId);
+      const categoryId = newCategoryId === "" ? null : Number(newCategoryId);
+      for (const [label, value] of [["priority", priorityId], ["assignee", assigneeId], ["category", categoryId]]) {
+        if (value !== null && (!Number.isSafeInteger(value) || value <= 0)) { toast.error(`Select a valid ${label}.`); return; }
+      }
       const maxInflight = Number(newMaxInflight);
       if (newMaxInflight !== "" && (!Number.isSafeInteger(maxInflight) || maxInflight < 0)) {
         toast.error("Max inflight tasks must be a non-negative integer.");
@@ -872,12 +905,17 @@ function makeSettingsComponent(host) {
           project_id: projectId,
           tracker_id: trackerId,
           status_id: statusId,
+          priority_id: priorityId,
+          assignee_id: assigneeId,
+          category_id: categoryId,
+          custom_field_filters: customFilters,
           max_inflight_tasks: newMaxInflight === "" ? 0 : maxInflight,
           enabled: true,
         });
         setNewProjectId("");
         setNewTrackerId("");
         setNewStatusId("");
+        setNewPriorityId(""); setNewAssigneeId(""); setNewCategoryId(""); setCustomFilters({}); setCustomFieldToAdd("");
         setNewMaxInflight("");
         toast.success("Watch created.");
         await load();
@@ -958,7 +996,7 @@ function makeSettingsComponent(host) {
           h(
             "div", { className: "space-y-2" },
             h(Label, { htmlFor: "redmine-new-watch-project" }, "Project"),
-            h(Select, { value: newProjectId || "__select_project__", onValueChange: (value) => setNewProjectId(value === "__select_project__" ? "" : value) },
+            h(Select, { value: newProjectId || "__select_project__", onValueChange: selectProject },
               h(SelectTrigger, { id: "redmine-new-watch-project", "data-testid": "redmine-watch-project", className: "w-full" }, h(SelectValue, { placeholder: "Select project" })),
               h(SelectContent, null, [h(SelectItem, { key: "__select_project__", value: "__select_project__" }, "Select project")].concat(projects.map((project) => h(SelectItem, { key: project.id, value: String(project.id) }, project.name)))),
             ),
@@ -995,6 +1033,43 @@ function makeSettingsComponent(host) {
           ),
           h(Button, { id: "redmine-watchers-create", "data-testid": "redmine-watch-create", className: "w-full lg:w-auto", disabled: creating, onClick: onCreate }, creating ? "Creating…" : "Add watch"),
         ),
+        newProjectId ? h(
+          "div", { className: "space-y-3 rounded-md border p-3", "data-testid": "redmine-watch-filters" },
+          h("div", { className: "flex items-center justify-between gap-2" }, h("div", null, h("h4", { className: "font-medium" }, "Dynamic Redmine filters"), h("p", { className: "text-muted-foreground text-sm" }, "Live options are scoped to the selected project.")), h(Button, { type: "button", variant: "outline", size: "sm", "data-testid": "redmine-watch-filters-refresh", disabled: refreshingFilters, onClick: () => { void refreshFilterOptions(); } }, refreshingFilters ? "Refreshing…" : "Refresh")),
+          h("div", { className: "grid gap-3 sm:grid-cols-3" },
+            h("div", { className: "space-y-2" }, h(Label, null, "Priority"), h(Select, { value: newPriorityId || "__any_priority__", onValueChange: (value) => setNewPriorityId(value === "__any_priority__" ? "" : value) }, h(SelectTrigger, { "data-testid": "redmine-watch-priority" }, h(SelectValue, null)), h(SelectContent, null, [h(SelectItem, { key: "__any_priority__", value: "__any_priority__" }, "Any priority")].concat((filterOptions.priorities || []).map((item) => h(SelectItem, { key: item.id, value: String(item.id) }, item.name)))))),
+            h("div", { className: "space-y-2" }, h(Label, null, "Assigned to"), h(Select, { value: newAssigneeId || "__any_assignee__", onValueChange: (value) => setNewAssigneeId(value === "__any_assignee__" ? "" : value) }, h(SelectTrigger, { "data-testid": "redmine-watch-assignee" }, h(SelectValue, null)), h(SelectContent, null, [h(SelectItem, { key: "__any_assignee__", value: "__any_assignee__" }, "Any assignee")].concat((filterOptions.assignees || []).map((item) => h(SelectItem, { key: item.id, value: String(item.id) }, item.name)))))),
+            h("div", { className: "space-y-2" }, h(Label, null, "Category"), h(Select, { value: newCategoryId || "__any_category__", onValueChange: (value) => setNewCategoryId(value === "__any_category__" ? "" : value) }, h(SelectTrigger, { "data-testid": "redmine-watch-category" }, h(SelectValue, null)), h(SelectContent, null, [h(SelectItem, { key: "__any_category__", value: "__any_category__" }, "Any category")].concat((filterOptions.categories || []).map((item) => h(SelectItem, { key: item.id, value: String(item.id) }, item.name)))))),
+          ),
+          h(
+            "div", { className: "space-y-2" }, h(Label, null, "Add custom-field filter"),
+            h(
+              Select,
+              { value: customFieldToAdd || "__select_custom_field__", onValueChange: (value) => { if (value !== "__select_custom_field__") setCustomFieldToAdd(value); } },
+              h(SelectTrigger, { "data-testid": "redmine-watch-custom-field-add" }, h(SelectValue, { placeholder: "Select custom field" })),
+              h(
+                SelectContent, null,
+                [h(SelectItem, { key: "__select_custom_field__", value: "__select_custom_field__" }, "Select custom field")].concat(
+                  (filterOptions.custom_fields || []).filter((field) => !(String(field.id) in customFilters)).map((field) => h(SelectItem, { key: field.id, value: String(field.id) }, field.name || `Custom field #${field.id}`)),
+                ),
+              ),
+            ),
+          ),
+          customFieldToAdd ? h(
+            "div", { className: "flex items-end gap-2" },
+            h(
+              "div", { className: "flex-1 space-y-2" },
+              h(Label, null, `Value for ${(filterOptions.custom_fields || []).find((field) => String(field.id) === customFieldToAdd)?.name || `custom field #${customFieldToAdd}`}`),
+              h(
+                Select,
+                { value: customFilters[customFieldToAdd] || "__select_custom_value__", onValueChange: (value) => { if (value !== "__select_custom_value__") { setCustomFilters({ ...customFilters, [customFieldToAdd]: value }); setCustomFieldToAdd(""); } } },
+                h(SelectTrigger, { "data-testid": "redmine-watch-custom-field-value" }, h(SelectValue, null)),
+                h(SelectContent, null, [h(SelectItem, { key: "__select_custom_value__", value: "__select_custom_value__" }, "Select value")].concat((filterOptions.custom_field_values[customFieldToAdd] || []).map((value) => h(SelectItem, { key: value, value }, value)))),
+              ),
+            ),
+          ) : null,
+          Object.entries(customFilters).map(([id, value]) => { const field = (filterOptions.custom_fields || []).find((candidate) => String(candidate.id) === id); return h("div", { key: id, className: "flex items-center justify-between text-sm", "data-testid": `redmine-watch-custom-filter-${id}` }, h("span", null, `${field?.name || `Custom field #${id}`}: ${value}`), h(Button, { type: "button", variant: "ghost", size: "sm", onClick: () => { const next = { ...customFilters }; delete next[id]; setCustomFilters(next); } }, "Remove")); }),
+        ) : null,
       ),
     );
   }

@@ -23,6 +23,8 @@ type Issue struct {
 	TrackerID    int
 	StatusID     int
 	PriorityID   int
+	AssigneeID   int
+	CategoryID   int
 	UpdatedOn    string
 	CustomFields []CustomFieldValue
 	Journals     []Journal
@@ -65,6 +67,8 @@ type rawIssue struct {
 	Tracker      idRef              `json:"tracker"`
 	Status       idRef              `json:"status"`
 	Priority     idRef              `json:"priority"`
+	Assignee     idRef              `json:"assigned_to"`
+	Category     idRef              `json:"category"`
 	UpdatedOn    string             `json:"updated_on"`
 	CustomFields []CustomFieldValue `json:"custom_fields"`
 	Journals     []Journal          `json:"journals"`
@@ -82,6 +86,8 @@ func (r rawIssue) toIssue(baseURL string) Issue {
 		TrackerID:    r.Tracker.ID,
 		StatusID:     r.Status.ID,
 		PriorityID:   r.Priority.ID,
+		AssigneeID:   r.Assignee.ID,
+		CategoryID:   r.Category.ID,
 		UpdatedOn:    r.UpdatedOn,
 		CustomFields: r.CustomFields,
 		Journals:     r.Journals,
@@ -122,8 +128,12 @@ type ListIssuesParams struct {
 	// UpdatedOnFrom is a Redmine date-filter operator string, e.g.
 	// ">=2026-01-01T00:00:00Z" (see internal/sync's cursor-based poll).
 	UpdatedOnFrom string
-	Offset        int
-	Limit         int
+	// Filters contains Redmine API filter query parameters. Callers only
+	// populate validated, plugin-owned keys (tracker_id, status_id,
+	// priority_id, assigned_to_id, category_id, and cf_<positive-id>).
+	Filters map[string]string
+	Offset  int
+	Limit   int
 }
 
 type ListIssuesResult struct {
@@ -146,6 +156,11 @@ func (s *Service) ListIssues(ctx context.Context, params ListIssuesParams) (*Lis
 	}
 	if params.UpdatedOnFrom != "" {
 		query["updated_on"] = params.UpdatedOnFrom
+	}
+	for key, value := range params.Filters {
+		if value != "" {
+			query[key] = value
+		}
 	}
 	limit := params.Limit
 	if limit <= 0 {
