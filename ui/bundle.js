@@ -230,7 +230,7 @@ function makeSettingsComponent(host) {
   const { jsx: h, ui, toast } = host;
   const {
     Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter,
-    Button, Input, Label, Badge, Switch, Checkbox,
+    Button, Input, Label, Badge, Switch,
     Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
     Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
     Empty, EmptyHeader, EmptyTitle, EmptyDescription,
@@ -360,6 +360,7 @@ function makeSettingsComponent(host) {
     const [loading, setLoading] = React.useState(true);
     const [projects, setProjects] = React.useState([]);
     const [selected, setSelected] = React.useState(new Set());
+    const [projectToAdd, setProjectToAdd] = React.useState("");
     const [saving, setSaving] = React.useState(false);
 
     const load = React.useCallback(async () => {
@@ -386,10 +387,22 @@ function makeSettingsComponent(host) {
     if (!connected) return null;
     if (loading) return h(Spinner, { id: "redmine-projects-loading" });
 
-    const toggle = (id) => {
+    const addProject = (value) => {
+      if (value === "__select_project__") {
+        setProjectToAdd("");
+        return;
+      }
+      const id = Number(value);
+      if (!Number.isSafeInteger(id) || id <= 0) return;
       const next = new Set(selected);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      next.add(id);
+      setSelected(next);
+      setProjectToAdd("");
+    };
+
+    const removeProject = (id) => {
+      const next = new Set(selected);
+      next.delete(id);
       setSelected(next);
     };
 
@@ -417,19 +430,35 @@ function makeSettingsComponent(host) {
           ? h(Empty, { id: "redmine-projects-empty" }, h(EmptyHeader, null, h(EmptyTitle, null, "No projects found")))
           : h(
               "div",
-              { className: "space-y-2" },
-              projects.map((project) =>
+              { className: "space-y-3" },
+              h(
+                "div",
+                { className: "space-y-2" },
+                h(Label, { htmlFor: "redmine-project-select" }, "Redmine project"),
                 h(
-                  "label",
-                  { key: project.id, className: "flex items-center gap-2" },
-                  h(Checkbox, {
-                    checked: selected.has(project.id),
-                    onCheckedChange: () => toggle(project.id),
-                    "data-testid": `redmine-project-${project.id}`,
-                  }),
-                  h("span", null, project.name),
+                  Select,
+                  { value: projectToAdd || "__select_project__", onValueChange: addProject },
+                  h(SelectTrigger, { id: "redmine-project-select", "data-testid": "redmine-project-select", className: "w-full" }, h(SelectValue, { placeholder: "Select project" })),
+                  h(SelectContent, null, [
+                    h(SelectItem, { key: "__select_project__", value: "__select_project__" }, "Select project"),
+                  ].concat(projects.map((project) => h(SelectItem, { key: project.id, value: String(project.id), disabled: selected.has(project.id) }, project.name)))),
                 ),
               ),
+              selected.size === 0
+                ? h("p", { className: "text-muted-foreground text-sm", "data-testid": "redmine-projects-none" }, "No projects selected.")
+                : h(
+                    "ul",
+                    { className: "space-y-2", "data-testid": "redmine-selected-projects" },
+                    Array.from(selected).map((id) => {
+                      const project = projects.find((candidate) => candidate.id === id);
+                      return h(
+                        "li",
+                        { key: id, className: "flex items-center justify-between gap-2" },
+                        h("span", null, project ? project.name : id),
+                        h(Button, { type: "button", variant: "ghost", size: "sm", "data-testid": `redmine-project-remove-${id}`, onClick: () => removeProject(id) }, "Remove"),
+                      );
+                    }),
+                  ),
             ),
       ),
       h(CardFooter, null, h(Button, { id: "redmine-projects-save", "data-testid": "redmine-projects-save", disabled: saving, onClick: onSave }, saving ? "Saving…" : "Save projects")),

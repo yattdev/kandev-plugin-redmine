@@ -38,6 +38,14 @@ test("watcher filters use Kandev Select controls and nonempty optional sentinels
   assert.doesNotMatch(bundle, /h\("select", \{ id: "redmine-new-watch-/);
 });
 
+test("project selection uses a dropdown with removable selected projects", () => {
+  assert.match(bundle, /redmine-project-select/);
+  assert.match(bundle, /redmine-selected-projects/);
+  assert.match(bundle, /redmine-project-remove-\$\{id\}/);
+  assert.match(bundle, /Select project/);
+  assert.doesNotMatch(bundle, /h\(Checkbox, \{[\s\S]*redmine-project-/);
+});
+
 test("mapping renders custom field identifiers and derived-mode evidence", () => {
   assert.match(bundle, /redmine-custom-fields/);
   assert.match(bundle, /redmine-custom-field-" \+ field\.id/);
