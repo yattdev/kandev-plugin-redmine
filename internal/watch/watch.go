@@ -68,9 +68,9 @@ type Watch struct {
 
 // Filter is a validated Redmine issue-list predicate.
 type Filter struct {
-	Field    string
-	Operator string
-	Value    string
+	Field    string `json:"field"`
+	Operator string `json:"operator"`
+	Value    string `json:"value"`
 }
 
 func (w Watch) matches(issue issues.Issue) bool {

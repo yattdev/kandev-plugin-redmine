@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestFilterJSONUsesActionContractFieldNames(t *testing.T) {
+	encoded, err := json.Marshal(Filter{Field: "status_id", Operator: "=", Value: "2"})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"field":"status_id","operator":"=","value":"2"}`, string(encoded))
+}
 
 func newIssuesService(t *testing.T, handler http.HandlerFunc) *issues.Service {
 	t.Helper()
