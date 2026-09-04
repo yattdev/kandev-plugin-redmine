@@ -2,6 +2,7 @@ package redmineclient
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 )
@@ -109,14 +110,15 @@ func (c *Client) ListIssuePriorities(ctx context.Context) ([]Priority, error) {
 
 // CustomFieldDef is one entry from /custom_fields.json — admin-only on
 // Redmine; a non-admin key gets a 403 (surfaced here as *APIError with Kind
-// ErrKindAPIDisabled, same as the connection-level "API disabled" case,
+// ErrKindPermissionDenied while /users/current.json still authenticates,
 // since Redmine returns the same status for both — internal/fieldmapping
 // distinguishes them by which endpoint it came from and falls back to
 // deriving fields from recently fetched issues rather than treating it as a
 // connection failure).
 type CustomFieldDef struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
+	ID             int      `json:"id"`
+	Name           string   `json:"name"`
+	PossibleValues []string `json:"possible_values"`
 }
 
 type customFieldsResponse struct {
@@ -133,4 +135,84 @@ func (c *Client) ListCustomFields(ctx context.Context) ([]CustomFieldDef, error)
 		return nil, err
 	}
 	return out.CustomFields, nil
+}
+
+// NamedID is the compact live-option shape used for project-specific issue
+// filters such as assignee and category.
+type NamedID struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+type projectMembersResponse struct {
+	Memberships []struct {
+		User NamedID `json:"user"`
+	} `json:"memberships"`
+	TotalCount int `json:"total_count"`
+}
+
+// ListProjectMembers returns users visible in a project. Redmine exposes
+// assignee choices through memberships, not a global users endpoint.
+func (c *Client) ListProjectMembers(ctx context.Context, projectID int) ([]NamedID, error) {
+	if projectID <= 0 {
+		return nil, fmt.Errorf("redmineclient: project ID must be positive")
+	}
+	result := make([]NamedID, 0)
+	for offset := 0; ; offset += 100 {
+		req, err := c.newRequest(ctx, http.MethodGet, "/projects/"+strconv.Itoa(projectID)+"/memberships.json", map[string]string{"offset": strconv.Itoa(offset), "limit": "100"})
+		if err != nil {
+			return nil, err
+		}
+		var out projectMembersResponse
+		if err := c.do(req, &out); err != nil {
+			return nil, err
+		}
+		for _, membership := range out.Memberships {
+			if membership.User.ID > 0 {
+				result = append(result, membership.User)
+			}
+		}
+		if len(out.Memberships) == 0 || offset+len(out.Memberships) >= out.TotalCount {
+			return result, nil
+		}
+	}
+}
+
+type issueCategoriesResponse struct {
+	IssueCategories []NamedID `json:"issue_categories"`
+}
+
+type versionsResponse struct {
+	Versions []NamedID `json:"versions"`
+}
+
+// ListProjectVersions returns target-version choices visible in a project.
+func (c *Client) ListProjectVersions(ctx context.Context, projectID int) ([]NamedID, error) {
+	if projectID <= 0 {
+		return nil, fmt.Errorf("redmineclient: project ID must be positive")
+	}
+	req, err := c.newRequest(ctx, http.MethodGet, "/projects/"+strconv.Itoa(projectID)+"/versions.json", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out versionsResponse
+	if err := c.do(req, &out); err != nil {
+		return nil, err
+	}
+	return out.Versions, nil
+}
+
+func (c *Client) ListIssueCategories(ctx context.Context, projectID int) ([]NamedID, error) {
+	if projectID <= 0 {
+		return nil, fmt.Errorf("redmineclient: project ID must be positive")
+	}
+	req, err := c.newRequest(ctx, http.MethodGet, "/projects/"+strconv.Itoa(projectID)+"/issue_categories.json", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out issueCategoriesResponse
+	if err := c.do(req, &out); err != nil {
+		return nil, err
+	}
+	return out.IssueCategories, nil
 }

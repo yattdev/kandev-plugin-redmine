@@ -27,6 +27,14 @@ on:
 permissions:
   contents: write
 
+# RELEASE BLOCKER: this candidate SHA carries the provider-neutral host
+# contract from kdlbs/kandev#2872. The publish job deliberately refuses a
+# fork contract. Replace both values with the first upstream release that
+# contains the merged contract before creating a Redmine release.
+env:
+  KANDEV_SDK_REPOSITORY: yattdev/kandev
+  KANDEV_SDK_REF: dcfe7c400719f0fc287b4e79e4b08ecb7afe717c
+
 jobs:
   prepare:
     name: Prepare release commit
@@ -154,6 +162,20 @@ jobs:
       }}
     runs-on: ubuntu-latest
     steps:
+      - name: Require a released upstream SDK contract
+        env:
+          SDK_REPOSITORY: ${{ env.KANDEV_SDK_REPOSITORY }}
+          SDK_REF: ${{ env.KANDEV_SDK_REF }}
+        run: |
+          test "$SDK_REPOSITORY" = "kdlbs/kandev" || {
+            echo "Release blocked: SDK contract still points at $SDK_REPOSITORY@$SDK_REF." >&2
+            exit 1
+          }
+          case "$SDK_REF" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "Release blocked: SDK ref must be an upstream release tag, got $SDK_REF." >&2; exit 1 ;;
+          esac
+
       - name: Checkout plugin
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -163,9 +185,9 @@ jobs:
       - name: Checkout kandev SDK contract
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          repository: kdlbs/kandev
+          repository: ${{ env.KANDEV_SDK_REPOSITORY }}
           path: kandev
-          ref: f218880ecbaa3d019d65b5d84fca6bdf160eced6
+          ref: ${{ env.KANDEV_SDK_REF }}
           sparse-checkout: |
             apps/backend
             apps/packages/plugin-sdk

@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"math"
 	"strconv"
+	"strings"
 
 	"kandev-plugin-redmine/internal/issues"
+	"kandev-plugin-redmine/internal/redmineclient"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
 )
@@ -38,9 +41,23 @@ func (p *redminePlugin) SearchEntityReferences(ctx context.Context, req *plugins
 	if limit <= 0 {
 		limit = 10
 	}
-	results, err := client.SearchIssues(ctx, req.Query, int(limit))
-	if err != nil {
+	projects, err := p.projectsSvc.GetSelection(ctx, req.WorkspaceID)
+	if err != nil || len(projects) == 0 {
 		return &pluginsdk.SearchEntityReferencesResponse{}, nil
+	}
+	seen := map[int]bool{}
+	var results []redmineclient.SearchResult
+	for _, projectID := range projects {
+		items, err := client.SearchIssuesInProject(ctx, req.Query, projectID, int(limit))
+		if err != nil {
+			return &pluginsdk.SearchEntityReferencesResponse{}, nil
+		}
+		for _, item := range items {
+			if !seen[item.ID] && len(results) < int(limit) {
+				seen[item.ID] = true
+				results = append(results, item)
+			}
+		}
 	}
 	candidates := make([]pluginsdk.EntityReferenceCandidate, len(results))
 	for i, r := range results {
@@ -73,25 +90,44 @@ func (p *redminePlugin) AuthorizeEntityReference(ctx context.Context, req *plugi
 	case referencePurposeSearch:
 		return &pluginsdk.AuthorizeEntityReferenceResponse{Allowed: true}, nil
 	case referencePurposeSubmission:
-		id, ok := issueIDFromReference(req.Reference)
+		id, ok := issueIDFromReference(req.Reference, client.BaseURL())
 		if !ok {
 			return &pluginsdk.AuthorizeEntityReferenceResponse{Allowed: false, Reason: "reference is missing an issue id"}, nil
 		}
-		if _, err := issues.New(client).GetIssue(ctx, id); err != nil {
+		issue, err := issues.New(client).GetIssue(ctx, id)
+		if err != nil {
 			return &pluginsdk.AuthorizeEntityReferenceResponse{Allowed: false, Reason: "issue is no longer available"}, nil
 		}
-		return &pluginsdk.AuthorizeEntityReferenceResponse{Allowed: true}, nil
+		projects, err := p.projectsSvc.GetSelection(ctx, req.WorkspaceID)
+		if err != nil {
+			return &pluginsdk.AuthorizeEntityReferenceResponse{Allowed: false, Reason: "project selection unavailable"}, nil
+		}
+		for _, projectID := range projects {
+			if projectID == issue.ProjectID {
+				return &pluginsdk.AuthorizeEntityReferenceResponse{Allowed: true}, nil
+			}
+		}
+		return &pluginsdk.AuthorizeEntityReferenceResponse{Allowed: false, Reason: "issue project is not selected"}, nil
 	default:
 		return &pluginsdk.AuthorizeEntityReferenceResponse{Allowed: false, Reason: "reference purpose is unsupported"}, nil
 	}
 }
 
-func issueIDFromReference(reference map[string]any) (int, bool) {
+// issueIDFromReference accepts only the same canonical forms as the task-link
+// action. The host normally supplies Candidate.ProviderLocalID in "id", but
+// keeping URL validation here prevents an untrusted caller from smuggling a
+// different Redmine origin through the submission authorization boundary.
+func issueIDFromReference(reference map[string]any, baseURL string) (int, bool) {
 	switch v := reference["id"].(type) {
 	case string:
-		id, err := strconv.Atoi(v)
+		id, err := parseIssueReference(strings.TrimSpace(v), baseURL)
 		return id, err == nil
 	case float64:
+		// JSON numbers are decoded as float64, so accepting values beyond the
+		// exact integer range could silently change an issue ID.
+		if v <= 0 || v != math.Trunc(v) || v > math.Min(float64(math.MaxInt), float64(1<<53-1)) {
+			return 0, false
+		}
 		return int(v), true
 	default:
 		return 0, false

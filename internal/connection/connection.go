@@ -1,5 +1,5 @@
 // Package connection owns the Redmine connection lifecycle: validating a
-// base URL + API key, persisting the encrypted key and connection metadata,
+// base URL + API key, persisting the host-managed secret and connection metadata,
 // and the workspace index the health poller (healthpoll.go) walks. One
 // Service instance is shared by every workspace; every method takes the
 // caller-supplied workspaceID and derives its own plugin_state/secret keys
@@ -9,9 +9,12 @@ package connection
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"kandev-plugin-redmine/internal/redmineclient"
@@ -37,6 +40,7 @@ type Record struct {
 	State     State
 	LastOK    string
 	LastError string
+	Revision  string
 }
 
 const (
@@ -45,6 +49,7 @@ const (
 	indexScope    = "instance"
 	indexScopeID  = ""
 	indexStateKey = "workspaces"
+	enabledKey    = "enabled"
 )
 
 // secretKey composes the workspace ID into the secret key itself, since the
@@ -55,57 +60,143 @@ func secretKey(workspaceID string) string {
 	return fmt.Sprintf("redmine.%s.api_key", workspaceID)
 }
 
+// GetEnabled returns the workspace's integration preference. Existing
+// installations predate this preference, so absence deliberately means
+// enabled to preserve their current behavior.
+func (s *Service) GetEnabled(ctx context.Context, workspaceID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, found, err := s.host.GetState(ctx, stateScope, workspaceID, enabledKey)
+	if err != nil {
+		return false, fmt.Errorf("connection: reading enabled state: %w", err)
+	}
+	if !found {
+		return true, nil
+	}
+	enabled, ok := value["enabled"].(bool)
+	if !ok {
+		return true, nil
+	}
+	return enabled, nil
+}
+
+// SetEnabled updates only the workspace preference. Credentials and all
+// mappings remain intact so re-enabling can resume synchronization.
+func (s *Service) SetEnabled(ctx context.Context, workspaceID string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if workspaceID == "" {
+		return errors.New("connection: workspace id is required")
+	}
+	if err := s.host.SetState(ctx, stateScope, workspaceID, enabledKey, map[string]any{"enabled": enabled}); err != nil {
+		return fmt.Errorf("connection: saving enabled state: %w", err)
+	}
+	return nil
+}
+
+// ClearEnabled removes the workspace preference during workspace deletion.
+func (s *Service) ClearEnabled(ctx context.Context, workspaceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.host.DeleteState(ctx, stateScope, workspaceID, enabledKey); err != nil {
+		return fmt.Errorf("connection: deleting enabled state: %w", err)
+	}
+	return nil
+}
+
 // Service is the connection lifecycle service. Safe for concurrent use: it
 // holds no mutable state of its own, only a Host handle and an HTTP client.
 type Service struct {
 	host       pluginsdk.Host
 	httpClient *http.Client
+	mu         sync.Mutex
 }
 
 func New(host pluginsdk.Host) *Service {
-	return &Service{host: host, httpClient: http.DefaultClient}
+	return &Service{host: host}
 }
 
 // Connect validates baseURL+apiKey against GET /users/current.json. On
-// success it encrypts and persists the key plus StateConnected metadata and
+// success it persists the key through the host secret boundary plus StateConnected metadata and
 // returns the new Record. On failure — invalid credentials, API disabled, or
 // unreachable host, each a distinct *redmineclient.APIError via errors.As —
 // nothing is persisted and any previously stored connection is left
 // unchanged. Also used for key rotation: a repeat Connect call for the same
 // workspace replaces the stored ciphertext under the same composed key.
 func (s *Service) Connect(ctx context.Context, workspaceID, baseURL, apiKey string) (*Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.connectLocked(ctx, workspaceID, baseURL, apiKey)
+}
+
+func (s *Service) connectLocked(ctx context.Context, workspaceID, baseURL, apiKey string) (*Record, error) {
 	if workspaceID == "" {
 		return nil, errors.New("connection: workspace id is required")
 	}
 	if baseURL == "" || apiKey == "" {
 		return nil, errors.New("connection: base url and api key are required")
 	}
+	normalizedURL, err := redmineclient.NormalizeBaseURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
 
-	client := redmineclient.New(baseURL, apiKey, s.httpClient)
+	client := redmineclient.New(normalizedURL, apiKey, s.httpClient)
 	if _, err := client.ValidateCredentials(ctx); err != nil {
 		return nil, err
 	}
-
-	encrypted, err := secretcrypto.Encrypt(workspaceID, apiKey)
+	previous, err := s.snapshotLocked(ctx, workspaceID)
 	if err != nil {
-		return nil, fmt.Errorf("connection: encrypting api key: %w", err)
+		return nil, err
 	}
-	if err := s.host.SetSecret(ctx, secretKey(workspaceID), encrypted); err != nil {
+
+	// SetSecret is the confidentiality boundary. Do not add a workspace-ID
+	// derived cipher here: workspace IDs are not secret and the host owns key
+	// management, rotation, and recovery.
+	if err := s.host.SetSecret(ctx, secretKey(workspaceID), apiKey); err != nil {
 		return nil, fmt.Errorf("connection: storing api key: %w", err)
 	}
 
-	record := &Record{BaseURL: baseURL, State: StateConnected, LastOK: nowRFC3339()}
+	record := &Record{BaseURL: normalizedURL, State: StateConnected, LastOK: nowRFC3339(), Revision: newRevision()}
 	if err := s.saveRecord(ctx, workspaceID, record); err != nil {
+		_ = s.restoreLocked(ctx, workspaceID, previous)
 		return nil, err
 	}
 	if err := s.addToIndex(ctx, workspaceID); err != nil {
+		_ = s.restoreLocked(ctx, workspaceID, previous)
 		return nil, err
 	}
 	return record, nil
 }
 
+// ConnectWithExistingKey validates and saves a changed base URL while
+// retaining the existing workspace secret. It is used only for an already
+// connected workspace; a first connection still requires an explicit key.
+func (s *Service) ConnectWithExistingKey(ctx context.Context, workspaceID, baseURL string) (*Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if baseURL == "" {
+		record, found, err := s.getLocked(ctx, workspaceID)
+		if err != nil || !found {
+			return nil, errors.New("connection: base url and api key are required")
+		}
+		baseURL = record.BaseURL
+	}
+	apiKey, err := s.decryptedAPIKeyLocked(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	return s.connectLocked(ctx, workspaceID, baseURL, apiKey)
+}
+
 // Get returns the current connection Record for workspaceID, if any.
 func (s *Service) Get(ctx context.Context, workspaceID string) (*Record, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getLocked(ctx, workspaceID)
+}
+
+func (s *Service) getLocked(ctx context.Context, workspaceID string) (*Record, bool, error) {
 	value, found, err := s.host.GetState(ctx, stateScope, workspaceID, stateKey)
 	if err != nil {
 		return nil, false, fmt.Errorf("connection: reading state: %w", err)
@@ -117,40 +208,72 @@ func (s *Service) Get(ctx context.Context, workspaceID string) (*Record, bool, e
 }
 
 // Client resolves an authenticated *redmineclient.Client for workspaceID
-// from its stored connection record and decrypted secret — the shared way
+// from its stored connection record and host-managed secret — the shared way
 // every other package (issues, projects, fieldmapping, sync, watch) reaches
 // Redmine for a given workspace.
 func (s *Service) Client(ctx context.Context, workspaceID string) (*redmineclient.Client, error) {
-	record, found, err := s.Get(ctx, workspaceID)
+	_, client, found, err := s.clientSnapshot(ctx, workspaceID)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
 		return nil, fmt.Errorf("connection: workspace %s has no connection", workspaceID)
 	}
-	apiKey, err := s.decryptedAPIKey(ctx, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	return redmineclient.New(record.BaseURL, apiKey, s.httpClient), nil
+	return client, nil
 }
 
-// Disconnect removes both the encrypted secret and the connection state for
+// clientSnapshot reads the record and secret under one mutex. This prevents a
+// rotating connection from ever pairing a new credential with an old base URL.
+func (s *Service) clientSnapshot(ctx context.Context, workspaceID string) (*Record, *redmineclient.Client, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, found, err := s.getLocked(ctx, workspaceID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if !found {
+		return nil, nil, false, nil
+	}
+	apiKey, err := s.decryptedAPIKeyLocked(ctx, workspaceID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return record, redmineclient.New(record.BaseURL, apiKey, s.httpClient), true, nil
+}
+
+// Disconnect removes both the host-managed secret and the connection state for
 // workspaceID and stops it from being health-polled.
 func (s *Service) Disconnect(ctx context.Context, workspaceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous, err := s.snapshotLocked(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
 	if err := s.host.DeleteSecret(ctx, secretKey(workspaceID)); err != nil {
 		return fmt.Errorf("connection: deleting secret: %w", err)
 	}
 	if err := s.host.DeleteState(ctx, stateScope, workspaceID, stateKey); err != nil {
+		_ = s.restoreLocked(ctx, workspaceID, previous)
 		return fmt.Errorf("connection: deleting state: %w", err)
 	}
-	return s.removeFromIndex(ctx, workspaceID)
+	if err := s.removeFromIndex(ctx, workspaceID); err != nil {
+		_ = s.restoreLocked(ctx, workspaceID, previous)
+		return err
+	}
+	return nil
 }
 
 // ListWorkspaceIDs returns every workspace with a connection, for the health
 // poller to walk. The host's ListState only lists keys within one
 // scope+scopeID, so this plugin maintains its own instance-scoped index.
 func (s *Service) ListWorkspaceIDs(ctx context.Context) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listWorkspaceIDsLocked(ctx)
+}
+
+func (s *Service) listWorkspaceIDsLocked(ctx context.Context) ([]string, error) {
 	value, found, err := s.host.GetState(ctx, indexScope, indexScopeID, indexStateKey)
 	if err != nil {
 		return nil, fmt.Errorf("connection: reading workspace index: %w", err)
@@ -169,7 +292,7 @@ func (s *Service) ListWorkspaceIDs(ctx context.Context) ([]string, error) {
 }
 
 func (s *Service) addToIndex(ctx context.Context, workspaceID string) error {
-	ids, err := s.ListWorkspaceIDs(ctx)
+	ids, err := s.listWorkspaceIDsLocked(ctx)
 	if err != nil {
 		return err
 	}
@@ -182,7 +305,7 @@ func (s *Service) addToIndex(ctx context.Context, workspaceID string) error {
 }
 
 func (s *Service) removeFromIndex(ctx context.Context, workspaceID string) error {
-	ids, err := s.ListWorkspaceIDs(ctx)
+	ids, err := s.listWorkspaceIDsLocked(ctx)
 	if err != nil {
 		return err
 	}
@@ -217,20 +340,41 @@ func (s *Service) saveRecord(ctx context.Context, workspaceID string, record *Re
 // to flip state without touching the stored secret — an invalid/unreachable
 // probe never deletes the key (spec Failure modes).
 func (s *Service) markHealthy(ctx context.Context, workspaceID string, record *Record) error {
-	record.State = StateConnected
-	record.LastOK = nowRFC3339()
-	record.LastError = ""
-	return s.saveRecord(ctx, workspaceID, record)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.markHealthLocked(ctx, workspaceID, record.Revision, StateConnected, "")
 }
 
 func (s *Service) markDegraded(ctx context.Context, workspaceID string, record *Record, reason string) error {
-	record.State = StateDegraded
-	record.LastError = reason
-	return s.saveRecord(ctx, workspaceID, record)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.markHealthLocked(ctx, workspaceID, record.Revision, StateDegraded, reason)
 }
 
-// decryptedAPIKey resolves and decrypts the stored API key for workspaceID.
+func (s *Service) markHealthLocked(ctx context.Context, workspaceID, revision string, state State, reason string) error {
+	current, found, err := s.getLocked(ctx, workspaceID)
+	if err != nil || !found || current.Revision != revision {
+		return err
+	}
+	current.State = state
+	if state == StateConnected {
+		current.LastOK = nowRFC3339()
+		current.LastError = ""
+	} else {
+		current.LastError = reason
+	}
+	return s.saveRecord(ctx, workspaceID, current)
+}
+
+// decryptedAPIKey resolves the host-managed key, decoding only a legacy v0.1
+// plugin-side envelope during upgrade migration.
 func (s *Service) decryptedAPIKey(ctx context.Context, workspaceID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.decryptedAPIKeyLocked(ctx, workspaceID)
+}
+
+func (s *Service) decryptedAPIKeyLocked(ctx context.Context, workspaceID string) (string, error) {
 	encrypted, found, err := s.host.GetSecret(ctx, secretKey(workspaceID))
 	if err != nil {
 		return "", fmt.Errorf("connection: reading secret: %w", err)
@@ -238,7 +382,65 @@ func (s *Service) decryptedAPIKey(ctx context.Context, workspaceID string) (stri
 	if !found {
 		return "", errors.New("connection: no api key stored for workspace")
 	}
-	return secretcrypto.Decrypt(workspaceID, encrypted)
+	// v0.1 stored a plugin-encrypted value. Read it once for upgrade
+	// compatibility, then rewrite plaintext through the host secret store.
+	if legacy, legacyErr := secretcrypto.Decrypt(workspaceID, encrypted); legacyErr == nil {
+		// Migration is best-effort: an existing connection must keep working if
+		// a transient host write fails. The next read retries the rewrite.
+		_ = s.host.SetSecret(ctx, secretKey(workspaceID), legacy)
+		return legacy, nil
+	}
+	return encrypted, nil
+}
+
+type persistenceSnapshot struct {
+	secret      string
+	secretFound bool
+	record      map[string]any
+	recordFound bool
+	index       map[string]any
+	indexFound  bool
+}
+
+func (s *Service) snapshotLocked(ctx context.Context, workspaceID string) (persistenceSnapshot, error) {
+	secret, secretFound, err := s.host.GetSecret(ctx, secretKey(workspaceID))
+	if err != nil {
+		return persistenceSnapshot{}, fmt.Errorf("connection: reading secret before update: %w", err)
+	}
+	record, recordFound, err := s.host.GetState(ctx, stateScope, workspaceID, stateKey)
+	if err != nil {
+		return persistenceSnapshot{}, fmt.Errorf("connection: reading state before update: %w", err)
+	}
+	index, indexFound, err := s.host.GetState(ctx, indexScope, indexScopeID, indexStateKey)
+	if err != nil {
+		return persistenceSnapshot{}, fmt.Errorf("connection: reading index before update: %w", err)
+	}
+	return persistenceSnapshot{secret: secret, secretFound: secretFound, record: record, recordFound: recordFound, index: index, indexFound: indexFound}, nil
+}
+
+// restoreLocked is deliberately best-effort: it is only used to undo a
+// failed multi-write operation. The original operation error remains the
+// caller-visible error, while each subsequent connect/disconnect retries from
+// the durable host state.
+func (s *Service) restoreLocked(ctx context.Context, workspaceID string, previous persistenceSnapshot) error {
+	if previous.secretFound {
+		if err := s.host.SetSecret(ctx, secretKey(workspaceID), previous.secret); err != nil {
+			return err
+		}
+	} else if err := s.host.DeleteSecret(ctx, secretKey(workspaceID)); err != nil {
+		return err
+	}
+	if previous.recordFound {
+		if err := s.host.SetState(ctx, stateScope, workspaceID, stateKey, previous.record); err != nil {
+			return err
+		}
+	} else if err := s.host.DeleteState(ctx, stateScope, workspaceID, stateKey); err != nil {
+		return err
+	}
+	if previous.indexFound {
+		return s.host.SetState(ctx, indexScope, indexScopeID, indexStateKey, previous.index)
+	}
+	return s.host.DeleteState(ctx, indexScope, indexScopeID, indexStateKey)
 }
 
 func (r *Record) toMap() map[string]any {
@@ -251,6 +453,9 @@ func (r *Record) toMap() map[string]any {
 	}
 	if r.LastError != "" {
 		m["last_error"] = r.LastError
+	}
+	if r.Revision != "" {
+		m["revision"] = r.Revision
 	}
 	return m
 }
@@ -269,7 +474,20 @@ func recordFromMap(m map[string]any) *Record {
 	if v, ok := m["last_error"].(string); ok {
 		r.LastError = v
 	}
+	if v, ok := m["revision"].(string); ok {
+		r.Revision = v
+	}
 	return r
 }
 
 func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
+
+func newRevision() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err == nil {
+		return hex.EncodeToString(buf)
+	}
+	// crypto/rand failure is exceptionally rare; retain a non-empty revision
+	// rather than failing a validated connection solely while recording state.
+	return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+}

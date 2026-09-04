@@ -92,7 +92,7 @@ func TestListCustomFields_AdminKey_ReturnsFields(t *testing.T) {
 	require.Equal(t, "Severity", fields[0].Name)
 }
 
-func TestListCustomFields_NonAdminKey_ReturnsAPIDisabledKindError(t *testing.T) {
+func TestListCustomFields_NonAdminKey_ReturnsPermissionDeniedKindError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 	}))
@@ -103,5 +103,5 @@ func TestListCustomFields_NonAdminKey_ReturnsAPIDisabledKindError(t *testing.T) 
 	require.Error(t, err)
 	var apiErr *redmineclient.APIError
 	require.ErrorAs(t, err, &apiErr)
-	require.Equal(t, redmineclient.ErrKindAPIDisabled, apiErr.Kind)
+	require.Equal(t, redmineclient.ErrKindPermissionDenied, apiErr.Kind)
 }

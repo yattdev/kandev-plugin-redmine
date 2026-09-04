@@ -95,3 +95,35 @@ func TestStatusForWorkflowStep_ResolvesOutboundDirection(t *testing.T) {
 	_, ok = m.StatusForWorkflowStep("step-unmapped")
 	require.False(t, ok)
 }
+
+func TestTaskLabelForTracker_ResolvesConfiguredNonEmptyMapping(t *testing.T) {
+	m := Mapping{Trackers: []TrackerMapping{
+		{RedmineTrackerID: 3, TaskLabel: "bug"},
+		{RedmineTrackerID: 4, TaskLabel: ""},
+	}}
+
+	label, ok := m.TaskLabelForTracker(3)
+	require.True(t, ok)
+	require.Equal(t, "bug", label)
+
+	_, ok = m.TaskLabelForTracker(4)
+	require.False(t, ok)
+	_, ok = m.TaskLabelForTracker(99)
+	require.False(t, ok)
+}
+
+func TestTaskPriorityForRedminePriority_ResolvesConfiguredNonEmptyMapping(t *testing.T) {
+	m := Mapping{Priorities: []PriorityMapping{
+		{RedminePriorityID: 4, TaskPriority: "high"},
+		{RedminePriorityID: 5, TaskPriority: ""},
+	}}
+
+	priority, ok := m.TaskPriorityForRedminePriority(4)
+	require.True(t, ok)
+	require.Equal(t, "high", priority)
+
+	_, ok = m.TaskPriorityForRedminePriority(5)
+	require.False(t, ok)
+	_, ok = m.TaskPriorityForRedminePriority(99)
+	require.False(t, ok)
+}

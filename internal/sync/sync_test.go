@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,13 +14,22 @@ import (
 	"kandev-plugin-redmine/internal/tasklink"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func testMapping() fieldmapping.Mapping {
-	return fieldmapping.Mapping{Statuses: []fieldmapping.StatusMapping{
-		{RedmineStatusID: 1, RedmineName: "Triage", IsClosed: false, WorkflowStepID: "step-backlog"},
-		{RedmineStatusID: 2, RedmineName: "Shipped", IsClosed: true, WorkflowStepID: "step-done"},
-	}}
+	return fieldmapping.Mapping{
+		Statuses: []fieldmapping.StatusMapping{
+			{RedmineStatusID: 1, RedmineName: "Triage", IsClosed: false, WorkflowStepID: "step-backlog"},
+			{RedmineStatusID: 2, RedmineName: "Shipped", IsClosed: true, WorkflowStepID: "step-done"},
+		},
+		Trackers: []fieldmapping.TrackerMapping{
+			{RedmineTrackerID: 3, TaskLabel: "bug"},
+			{RedmineTrackerID: 4, TaskLabel: "feature"},
+		},
+		Priorities: []fieldmapping.PriorityMapping{{RedminePriorityID: 5, TaskPriority: "high"}},
+	}
 }
 
 func TestPollInbound_LinkedIssueStatusChange_MovesTaskToMappedStep(t *testing.T) {
@@ -67,6 +77,25 @@ func TestPollInbound_UnlinkedIssue_DoesNotTouchAnyTask(t *testing.T) {
 	require.Empty(t, host.updateCalls())
 }
 
+func TestPollInbound_NotFoundTaskSelfHealsStaleLink(t *testing.T) {
+	host := newFakeHost()
+	host.updateErr = status.Error(codes.NotFound, "task deleted")
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"s","status":{"id":2},"updated_on":"2026-01-01T00:00:00Z"}],"total_count":1}`))
+	}))
+	defer srv.Close()
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
+	_, found, err := tl.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.False(t, found)
+	_, found, err = tl.TaskIDForIssue(context.Background(), "ws-1", 42)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
 func TestPollInbound_TitleDescriptionSync_OnlyWhenEnabled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -103,6 +132,132 @@ func TestPollInbound_TitleDescriptionSync_OnlyWhenEnabled(t *testing.T) {
 		require.NotNil(t, calls[0].Description)
 		require.Equal(t, "New body", *calls[0].Description)
 	})
+}
+
+func TestPollInbound_OverlappedUnchangedTitleDescriptionWritesOnce(t *testing.T) {
+	host := newFakeHost()
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"Stable title","description":"Stable description","status":{"id":99},"updated_on":"2026-01-01T00:00:00Z"}],"total_count":1}`))
+	}))
+	defer srv.Close()
+	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
+	// Status 99 is deliberately unmapped, isolating title/description
+	// idempotency from the SDK's current lack of readable workflow step ID.
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{SyncTitleDescription: true}))
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{SyncTitleDescription: true}))
+	require.Len(t, host.updateCalls(), 1)
+}
+
+func TestPollInbound_OverlappedMappedStatusTransitionsOnlyOnce(t *testing.T) {
+	host := newFakeHost()
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":2},"updated_on":"2026-01-01T00:00:00Z"}],"total_count":1}`))
+	}))
+	defer srv.Close()
+	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
+	require.Len(t, host.updateCalls(), 1)
+	require.Equal(t, "step-done", host.task.WorkflowStepID)
+}
+
+func TestPollInbound_ManualMoveAwayIsRestoredFromMappedRedmineStatus(t *testing.T) {
+	host := newFakeHost()
+	host.task.WorkflowStepID = "step-other"
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":2},"updated_on":"2026-01-01T00:00:00Z"}],"total_count":1}`))
+	}))
+	defer srv.Close()
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
+	require.Equal(t, "step-done", host.task.WorkflowStepID)
+	require.Len(t, host.updateCalls(), 1)
+}
+
+func TestPollInbound_AppliesPriorityAndTrackerLabelWithoutChangingUserLabels(t *testing.T) {
+	host := newFakeHost()
+	host.task.Labels = []string{"customer", "keep-order"}
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":99},"tracker":{"id":3},"priority":{"id":5},"updated_on":"2026-01-01T00:00:00Z"}],"total_count":1}`))
+	}))
+	defer srv.Close()
+	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
+
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
+	require.Len(t, host.updateCalls(), 1)
+	require.Equal(t, "high", host.task.Priority)
+	require.Equal(t, []string{"customer", "keep-order", "bug"}, host.task.Labels)
+	link, found, err := tl.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "bug", link.AppliedTrackerLabel)
+
+	// The overlap poll is fully idempotent once task fields and ownership
+	// marker agree with Redmine.
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
+	require.Len(t, host.updateCalls(), 1)
+}
+
+func TestPollInbound_TrackerTransitionReplacesOnlyPluginOwnedLabel(t *testing.T) {
+	host := newFakeHost()
+	host.task.Labels = []string{"customer", "bug", "keep-order"}
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	require.NoError(t, tl.RecordAppliedTrackerLabel(context.Background(), "task-1", "bug"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":99},"tracker":{"id":4}}],"total_count":1}`))
+	}))
+	defer srv.Close()
+
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
+	require.Equal(t, []string{"customer", "keep-order", "feature"}, host.task.Labels)
+}
+
+func TestPollInbound_EmptyTrackerMappingRemovesOnlyPreviousOwnedLabel(t *testing.T) {
+	host := newFakeHost()
+	host.task.Labels = []string{"customer", "bug", "keep-order"}
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	require.NoError(t, tl.RecordAppliedTrackerLabel(context.Background(), "task-1", "bug"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":99},"tracker":{"id":88}}],"total_count":1}`))
+	}))
+	defer srv.Close()
+
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
+	require.Equal(t, []string{"customer", "keep-order"}, host.task.Labels)
+}
+
+func TestPollInbound_PreexistingMatchingUserLabelRemainsUnowned(t *testing.T) {
+	host := newFakeHost()
+	host.task.Labels = []string{"customer", "bug"}
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issues":[{"id":42,"status":{"id":99},"tracker":{"id":3}}],"total_count":1}`))
+	}))
+	defer srv.Close()
+
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
+	require.Empty(t, host.updateCalls())
+	link, found, err := tl.Get(context.Background(), "task-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Empty(t, link.AppliedTrackerLabel)
 }
 
 func TestPollInbound_CursorAdvancesAndPersistsAcrossRestarts(t *testing.T) {
@@ -155,6 +310,10 @@ func TestPushWriteback_MappedStepChange_IssuesPUTAndRecordsEchoSuppression(t *te
 
 	var putStatusID any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"issue":{"id":42,"status":{"id":1}}}`))
+			return
+		}
 		require.Equal(t, http.MethodPut, r.Method)
 		var body map[string]any
 		_ = readJSONBody(r, &body)
@@ -203,9 +362,13 @@ func TestPushWriteback_AlreadyPushedSameStatus_IsIdempotent(t *testing.T) {
 	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
 	require.NoError(t, tl.RecordPushedStatus(context.Background(), "task-1", 2)) // already pushed
 
-	callCount := 0
+	putCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"issue":{"id":42,"status":{"id":2}}}`))
+			return
+		}
+		putCount++
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -214,7 +377,27 @@ func TestPushWriteback_AlreadyPushedSameStatus_IsIdempotent(t *testing.T) {
 
 	err := svc.PushWriteback(context.Background(), "task-1", "step-done", testMapping(), issuesSvc, Options{AutoStatusWriteback: true})
 	require.NoError(t, err)
-	require.Equal(t, 0, callCount, "a duplicate write-back for the same already-pushed status must not issue a redundant PUT")
+	require.Equal(t, 0, putCount, "a duplicate write-back for the same live Redmine status must not issue a redundant PUT")
+}
+
+func TestPushWriteback_StaleMarkerDoesNotSuppressRemoteDrift(t *testing.T) {
+	host := newFakeHost()
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	require.NoError(t, tl.RecordPushedStatus(context.Background(), "task-1", 2))
+	putCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"issue":{"id":42,"status":{"id":1}}}`))
+			return
+		}
+		putCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	require.NoError(t, svc.PushWriteback(context.Background(), "task-1", "step-done", testMapping(), issues.New(redmineclient.New(srv.URL, "key", srv.Client())), Options{AutoStatusWriteback: true}))
+	require.Equal(t, 1, putCount)
 }
 
 func TestEchoSuppression_WriteBackThenInboundPoll_DoesNotBounceTask(t *testing.T) {
@@ -241,6 +424,39 @@ func TestEchoSuppression_WriteBackThenInboundPoll_DoesNotBounceTask(t *testing.T
 
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
 	require.Empty(t, host.updateCalls(), "the inbound poll observing our own pushed status must not re-apply/bounce the task")
+}
+
+func TestPushWriteback_DuplicateAfterEchoConsumptionReadsLiveStatusAndSkipsPUT(t *testing.T) {
+	host := newFakeHost()
+	tl := tasklink.New(host)
+	svc := New(host, tl)
+	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
+	putCount := 0
+	redmineStatus := 1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if r.URL.Path == "/issues/42.json" {
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"issue":{"id":42,"status":{"id":%d}}}`, redmineStatus)))
+				return
+			}
+			_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"s","status":{"id":2},"updated_on":"2026-01-01T00:00:00Z"}],"total_count":1}`))
+		case http.MethodPut:
+			putCount++
+			redmineStatus = 2
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
+
+	// First event writes, inbound consumes its one-shot marker, then a
+	// duplicate event observes Redmine already has the desired status.
+	require.NoError(t, svc.PushWriteback(context.Background(), "task-1", "step-done", testMapping(), issuesSvc, Options{AutoStatusWriteback: true}))
+	require.Equal(t, 1, putCount)
+	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
+	require.NoError(t, svc.PushWriteback(context.Background(), "task-1", "step-done", testMapping(), issuesSvc, Options{AutoStatusWriteback: true}))
+	require.Equal(t, 1, putCount)
 }
 
 func TestSaveAndGetOptions_RoundTrip(t *testing.T) {

@@ -5,19 +5,19 @@
 # every route kandev serves for this plugin (/api/plugins/<id>/...).
 id: "kandev-plugin-redmine"
 api_version: 1
-version: "0.1.0"
+version: "0.2.0"
 display_name: "Redmine"
 description: "Connect a Redmine instance: link kandev tasks to Redmine issues, sync status both ways, and watch for new issues."
-author: "kandev"
+author: "yattdev"
 categories: ["connector"]
 repo_url: "https://github.com/yattdev/kandev-plugin-redmine"
 
-# min_kandev_version: "0.88.0" is the release that first carries PR #2117's
-# generic plugin seams this plugin depends on (registerIntegrationSettings,
-# registerTaskAction({placement:"link"}), reference_sources, the
-# PluginOwnedTaskTrees RPCs) — merge commit f218880e is first reachable from
-# tag v0.88.0.
-min_kandev_version: "0.88.0"
+# Provisional conservative floor for the development candidate. The plugin
+# also needs the provider-neutral Task.Update priority/labels/workflow-step
+# contract in kdlbs/kandev#2872, which is not released yet. Before publishing,
+# replace this with the first upstream release that actually contains that
+# contract and replace the workflow candidate SHA with the same release tag.
+min_kandev_version: "0.91.0"
 
 runtime:
   type: binary
@@ -56,16 +56,14 @@ runtime:
 #              status immediately rather than waiting for the next sync poll.
 #              This corrects task 01's original "no events capability"
 #              design decision — the spec's write-back scenario ("within one
-#              event-loop turn") is only achievable with it; the sync poll
-#              still runs as a reconciliation backstop since OnEvent delivery
-#              is best-effort (bounded in-memory queue, can be lost on
-#              backend restart per the plugin host's own delivery contract).
+#              event-loop turn") is only achievable with it. The sync poll is
+#              inbound only; it does not recreate a missed outbound event.
 capabilities:
   state: true
   secrets: true
   api_read: ["tasks", "workflows"]
   api_write: ["tasks"]
-  events: ["task.moved"]
+  events: ["task.moved", "task.deleted", "workspace.deleted"]
 
 # actions: the plugin's own native settings UI calls these via
 # host.api.invokeAction (never host.api.fetch, which cannot reach them). Every
@@ -76,20 +74,28 @@ actions:
   - { key: "connection.get", scope: "workspace", max_body_bytes: 8192 }
   - { key: "connection.save", scope: "workspace", max_body_bytes: 8192 }
   - { key: "connection.disconnect", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "integration.enabled.get", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "integration.enabled.save", scope: "workspace", max_body_bytes: 8192 }
   - { key: "projects.list", scope: "workspace", max_body_bytes: 8192 }
   - { key: "projects.save", scope: "workspace", max_body_bytes: 32768 }
   - { key: "workflows.list", scope: "workspace", max_body_bytes: 8192 }
   - { key: "fieldmapping.get", scope: "workspace", max_body_bytes: 8192 }
   - { key: "fieldmapping.save", scope: "workspace", max_body_bytes: 65536 }
   - { key: "syncoptions.save", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "syncoptions.get", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "issues.create", scope: "workspace", max_body_bytes: 65536 }
+  - { key: "issues.update", scope: "workspace", max_body_bytes: 65536 }
+  - { key: "issues.upload", scope: "workspace", max_body_bytes: 1048576 }
   - { key: "link.get", scope: "task", max_body_bytes: 8192 }
   - { key: "link.set", scope: "task", max_body_bytes: 8192 }
   - { key: "link.unset", scope: "task", max_body_bytes: 8192 }
   - { key: "link.set_status", scope: "task", max_body_bytes: 8192 }
   - { key: "watches.list", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "watches.filter_options", scope: "workspace", max_body_bytes: 8192 }
   - { key: "watches.create", scope: "workspace", max_body_bytes: 32768 }
   - { key: "watches.update", scope: "workspace", max_body_bytes: 32768 }
   - { key: "watches.delete", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "watches.poll", scope: "workspace", max_body_bytes: 8192 }
 
 # reference_sources: composer `#` mentions resolve Redmine issues through
 # SearchEntityReferences/AuthorizeEntityReference (backend, task 06/08) with

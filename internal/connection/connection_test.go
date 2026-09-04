@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"kandev-plugin-redmine/internal/redmineclient"
@@ -26,7 +27,7 @@ func validRedmineServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-func TestConnect_ValidKey_PersistsEncryptedSecretAndConnectedState(t *testing.T) {
+func TestConnect_ValidKey_PersistsHostManagedSecretAndConnectedState(t *testing.T) {
 	host := newFakeHost()
 	svc := New(host)
 	srv := validRedmineServer(t)
@@ -40,16 +41,35 @@ func TestConnect_ValidKey_PersistsEncryptedSecretAndConnectedState(t *testing.T)
 	stored, found, err := host.GetSecret(context.Background(), secretKey("ws-1"))
 	require.NoError(t, err)
 	require.True(t, found)
-	require.NotContains(t, stored, "good-key") // stored value is ciphertext, not cleartext
-
-	decrypted, err := secretcrypto.Decrypt("ws-1", stored)
-	require.NoError(t, err)
-	require.Equal(t, "good-key", decrypted)
+	require.Equal(t, "good-key", stored, "plugin hands plaintext only to the host secret store")
 
 	got, found, err := svc.Get(context.Background(), "ws-1")
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, StateConnected, got.State)
+}
+
+func TestEnabledPreference_DefaultsTrueAndRoundTripsWithoutDeletingConnection(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	srv := validRedmineServer(t)
+	_, err := svc.Connect(context.Background(), "ws-1", srv.URL, "good-key")
+	require.NoError(t, err)
+
+	enabled, err := svc.GetEnabled(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.True(t, enabled)
+	require.NoError(t, svc.SetEnabled(context.Background(), "ws-1", false))
+	enabled, err = svc.GetEnabled(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.False(t, enabled)
+
+	_, found, err := svc.Get(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.True(t, found)
+	_, found, err = host.GetSecret(context.Background(), secretKey("ws-1"))
+	require.NoError(t, err)
+	require.True(t, found)
 }
 
 func TestConnect_InvalidKey_PersistsNothing(t *testing.T) {
@@ -110,7 +130,7 @@ func TestConnect_UnreachableHost_DoesNotOverwritePreviousHealthyState(t *testing
 	require.Equal(t, srv.URL, got.BaseURL)
 }
 
-func TestConnect_RotatingKey_ReplacesCiphertextUnderSameKey(t *testing.T) {
+func TestConnect_RotatingKey_ReplacesHostManagedSecretUnderSameKey(t *testing.T) {
 	host := newFakeHost()
 	svc := New(host)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -126,16 +146,14 @@ func TestConnect_RotatingKey_ReplacesCiphertextUnderSameKey(t *testing.T) {
 
 	_, err := svc.Connect(context.Background(), "ws-1", srv.URL, "first-key")
 	require.NoError(t, err)
-	firstCiphertext, _, _ := host.GetSecret(context.Background(), secretKey("ws-1"))
+	firstSecret, _, _ := host.GetSecret(context.Background(), secretKey("ws-1"))
 
 	_, err = svc.Connect(context.Background(), "ws-1", srv.URL, "second-key")
 	require.NoError(t, err)
-	secondCiphertext, _, _ := host.GetSecret(context.Background(), secretKey("ws-1"))
+	secondSecret, _, _ := host.GetSecret(context.Background(), secretKey("ws-1"))
 
-	require.NotEqual(t, firstCiphertext, secondCiphertext)
-	decrypted, err := secretcrypto.Decrypt("ws-1", secondCiphertext)
-	require.NoError(t, err)
-	require.Equal(t, "second-key", decrypted)
+	require.Equal(t, "first-key", firstSecret)
+	require.Equal(t, "second-key", secondSecret)
 }
 
 func TestDisconnect_RemovesSecretAndState(t *testing.T) {
@@ -207,10 +225,8 @@ func TestTwoWorkspaces_CannotReadOrAffectEachOthersSecretOrState(t *testing.T) {
 	ws2Secret, _, _ := host.GetSecret(context.Background(), secretKey("ws-2"))
 	require.NotEqual(t, ws1Secret, ws2Secret)
 
-	// A key-composition bug that decrypted ws-1's secret under ws-2's
-	// workspace ID must fail closed rather than silently returning ws-1's key.
-	_, err = secretcrypto.Decrypt("ws-2", ws1Secret)
-	require.Error(t, err)
+	require.Equal(t, "ws1-key", ws1Secret)
+	require.Equal(t, "ws2-key", ws2Secret)
 
 	require.NoError(t, svc.Disconnect(context.Background(), "ws-1"))
 
@@ -222,4 +238,91 @@ func TestTwoWorkspaces_CannotReadOrAffectEachOthersSecretOrState(t *testing.T) {
 	_, found, err = host.GetSecret(context.Background(), secretKey("ws-2"))
 	require.NoError(t, err)
 	require.True(t, found, "disconnecting ws-1 must not remove ws-2's secret")
+}
+
+func TestClient_LegacyEncryptedSecretMigratesToHostManagedValue(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	srv := validRedmineServer(t)
+	legacy, err := secretcrypto.Encrypt("ws-1", "good-key")
+	require.NoError(t, err)
+	require.NoError(t, host.SetSecret(context.Background(), secretKey("ws-1"), legacy))
+	require.NoError(t, svc.saveRecord(context.Background(), "ws-1", &Record{BaseURL: srv.URL, State: StateConnected}))
+
+	client, err := svc.Client(context.Background(), "ws-1")
+	require.NoError(t, err)
+	_, err = client.ValidateCredentials(context.Background())
+	require.NoError(t, err)
+	stored, found, err := host.GetSecret(context.Background(), secretKey("ws-1"))
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "good-key", stored)
+}
+
+func TestClient_LegacySecretStillWorksWhenBestEffortRewriteFails(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	srv := validRedmineServer(t)
+	legacy, err := secretcrypto.Encrypt("ws-1", "good-key")
+	require.NoError(t, err)
+	require.NoError(t, host.SetSecret(context.Background(), secretKey("ws-1"), legacy))
+	require.NoError(t, svc.saveRecord(context.Background(), "ws-1", &Record{BaseURL: srv.URL, State: StateConnected}))
+	host.failSecretWrites()
+	client, err := svc.Client(context.Background(), "ws-1")
+	require.NoError(t, err)
+	_, err = client.ValidateCredentials(context.Background())
+	require.NoError(t, err)
+}
+
+func TestConnect_ConcurrentWorkspacesDoNotLoseIndexEntries(t *testing.T) {
+	host := newFakeHost()
+	svc := New(host)
+	srv := validRedmineServer(t)
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, workspaceID := range []string{"ws-1", "ws-2"} {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			_, err := svc.Connect(context.Background(), id, srv.URL, "good-key")
+			errs <- err
+		}(workspaceID)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	ids, err := svc.ListWorkspaceIDs(context.Background())
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"ws-1", "ws-2"}, ids)
+}
+
+func TestConnect_StateOrIndexFailureRollsBackSecretAndRecord(t *testing.T) {
+	for _, failure := range []struct {
+		name                string
+		scope, scopeID, key string
+	}{
+		{name: "record", scope: stateScope, scopeID: "ws-1", key: stateKey},
+		{name: "index", scope: indexScope, scopeID: indexScopeID, key: indexStateKey},
+	} {
+		t.Run(failure.name, func(t *testing.T) {
+			host := newFakeHost()
+			svc := New(host)
+			srv := validRedmineServer(t)
+			host.failNextStateWrite(failure.scope, failure.scopeID, failure.key)
+
+			_, err := svc.Connect(context.Background(), "ws-1", srv.URL, "good-key")
+			require.Error(t, err)
+			_, found, err := svc.Get(context.Background(), "ws-1")
+			require.NoError(t, err)
+			require.False(t, found)
+			_, found, err = host.GetSecret(context.Background(), secretKey("ws-1"))
+			require.NoError(t, err)
+			require.False(t, found)
+			ids, err := svc.ListWorkspaceIDs(context.Background())
+			require.NoError(t, err)
+			require.NotContains(t, ids, "ws-1")
+		})
+	}
 }

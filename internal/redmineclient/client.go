@@ -9,8 +9,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 )
 
 // Client talks to one Redmine instance under one API key. It holds no
@@ -22,10 +25,51 @@ type Client struct {
 	httpClient *http.Client
 }
 
+const defaultHTTPTimeout = 15 * time.Second
+
+const (
+	maxRetryAttempts = 3
+	retryBaseDelay   = 50 * time.Millisecond
+	maxRetryDelay    = 1 * time.Second
+)
+
+// NormalizeBaseURL accepts only an HTTP(S) origin or an HTTP(S) origin with a
+// Redmine subpath. Credentials, queries and fragments are never meaningful
+// for an API base URL and accepting them risks credential confusion.
+func NormalizeBaseURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("redmineclient: base URL must be an absolute http(s) URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("redmineclient: base URL scheme must be http or https")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("redmineclient: base URL must not include credentials, query, or fragment")
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = ""
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
+func defaultHTTPClient() *http.Client {
+	client := &http.Client{Timeout: defaultHTTPTimeout}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) == 0 || req.URL.Scheme != via[0].URL.Scheme || req.URL.Host != via[0].URL.Host {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+	return client
+}
+
 // New builds a Client. httpClient must not be nil; callers own its timeout
 // and transport configuration (proxy env vars are honored for free by Go's
 // default transport, per the spec's Network section).
 func New(baseURL, apiKey string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = defaultHTTPClient()
+	}
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		apiKey:     apiKey,
@@ -40,6 +84,7 @@ type ErrorKind string
 const (
 	ErrKindInvalidCredentials ErrorKind = "invalid_credentials"
 	ErrKindAPIDisabled        ErrorKind = "api_disabled"
+	ErrKindPermissionDenied   ErrorKind = "permission_denied"
 	ErrKindUnreachable        ErrorKind = "unreachable"
 	ErrKindUnexpected         ErrorKind = "unexpected"
 )
@@ -57,6 +102,16 @@ func (e *APIError) Error() string { return e.Message }
 // newRequest builds an authenticated GET request against path (which must
 // start with "/"), with query parameters merged in.
 func (c *Client) newRequest(ctx context.Context, method, path string, query map[string]string) (*http.Request, error) {
+	values := make(url.Values, len(query))
+	for key, value := range query {
+		values.Set(key, value)
+	}
+	return c.newRequestValues(ctx, method, path, values)
+}
+
+// newRequestValues is the multi-value counterpart used for Redmine's native
+// issue-filter syntax (f[]=..., op[field]=..., v[field][] = ...).
+func (c *Client) newRequestValues(ctx context.Context, method, path string, query url.Values) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("redmineclient: building request: %w", err)
@@ -65,8 +120,11 @@ func (c *Client) newRequest(ctx context.Context, method, path string, query map[
 	req.Header.Set("Accept", "application/json")
 
 	q := req.URL.Query()
-	for k, v := range query {
-		q.Set(k, v)
+	for key, values := range query {
+		q.Del(key)
+		for _, value := range values {
+			q.Add(key, value)
+		}
 	}
 	req.URL.RawQuery = q.Encode()
 	return req, nil
@@ -76,22 +134,81 @@ func (c *Client) newRequest(ctx context.Context, method, path string, query map[
 // into a typed *APIError. On success it decodes the JSON body into out (skip
 // decoding by passing a nil out, e.g. for 204 responses).
 func (c *Client) do(req *http.Request, out any) error {
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return &APIError{Kind: ErrKindUnreachable, Message: fmt.Sprintf("redmineclient: %s %s: %v", req.Method, req.URL.Path, err)}
-	}
-	defer func() { _ = resp.Body.Close() }()
+	for attempt := 0; ; attempt++ {
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			if !canRetry(req) || attempt+1 >= maxRetryAttempts {
+				return &APIError{Kind: ErrKindUnreachable, Message: fmt.Sprintf("redmineclient: %s %s: %v", req.Method, req.URL.Path, err)}
+			}
+			if err := waitForRetry(req.Context(), retryDelay(nil, attempt)); err != nil {
+				return &APIError{Kind: ErrKindUnreachable, Message: fmt.Sprintf("redmineclient: retry cancelled: %v", err)}
+			}
+			resetRequestBody(req)
+			continue
+		}
+		if retryableStatus(resp.StatusCode) && canRetry(req) && attempt+1 < maxRetryAttempts {
+			delay := retryDelay(resp, attempt)
+			_ = resp.Body.Close()
+			if err := waitForRetry(req.Context(), delay); err != nil {
+				return &APIError{Kind: ErrKindUnexpected, StatusCode: resp.StatusCode, Message: fmt.Sprintf("redmineclient: retry cancelled: %v", err)}
+			}
+			resetRequestBody(req)
+			continue
+		}
+		defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return classifyErrorStatus(resp.StatusCode, req.URL.Path)
-	}
-	if out == nil {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return classifyErrorStatus(resp.StatusCode, req.URL.Path)
+		}
+		if out == nil {
+			return nil
+		}
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			return &APIError{Kind: ErrKindUnexpected, StatusCode: resp.StatusCode, Message: fmt.Sprintf("redmineclient: decoding response from %s: %v", req.URL.Path, err)}
+		}
 		return nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return &APIError{Kind: ErrKindUnexpected, StatusCode: resp.StatusCode, Message: fmt.Sprintf("redmineclient: decoding response from %s: %v", req.URL.Path, err)}
+}
+
+func canRetry(req *http.Request) bool {
+	return req.Method == http.MethodGet || (req.Method == http.MethodPut && req.GetBody != nil)
+}
+
+func resetRequestBody(req *http.Request) {
+	if req.GetBody == nil {
+		return
 	}
-	return nil
+	body, err := req.GetBody()
+	if err == nil {
+		req.Body = body
+	}
+}
+
+func retryableStatus(status int) bool { return status == http.StatusTooManyRequests || status >= 500 }
+
+func retryDelay(resp *http.Response, attempt int) time.Duration {
+	if resp != nil {
+		retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After"))
+		if seconds, err := time.ParseDuration(retryAfter + "s"); err == nil && seconds > 0 {
+			return min(seconds, maxRetryDelay)
+		}
+		if when, err := http.ParseTime(retryAfter); err == nil {
+			return min(max(time.Until(when), 0), maxRetryDelay)
+		}
+	}
+	delay := retryBaseDelay << attempt
+	return min(delay/2+time.Duration(rand.Int63n(int64(delay/2)+1)), maxRetryDelay) //nolint:gosec // retry jitter is not security-sensitive
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func classifyErrorStatus(statusCode int, path string) *APIError {
@@ -99,6 +216,9 @@ func classifyErrorStatus(statusCode int, path string) *APIError {
 	case http.StatusUnauthorized:
 		return &APIError{Kind: ErrKindInvalidCredentials, StatusCode: statusCode, Message: "redmineclient: Redmine rejected the API key"}
 	case http.StatusForbidden:
+		if !strings.HasSuffix(path, "/users/current.json") {
+			return &APIError{Kind: ErrKindPermissionDenied, StatusCode: statusCode, Message: fmt.Sprintf("redmineclient: permission denied for %s", path)}
+		}
 		return &APIError{Kind: ErrKindAPIDisabled, StatusCode: statusCode, Message: "redmineclient: Redmine's REST API is disabled (Administration > Settings > API)"}
 	default:
 		return &APIError{Kind: ErrKindUnexpected, StatusCode: statusCode, Message: fmt.Sprintf("redmineclient: unexpected status %d from %s", statusCode, path)}
