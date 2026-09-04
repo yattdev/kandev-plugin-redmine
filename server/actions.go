@@ -463,7 +463,7 @@ func (p *redminePlugin) validateMappingWorkflow(ctx context.Context, workspaceID
 	if mapping.WorkflowID == "" {
 		return fmt.Errorf("redmine: workflow_id is required")
 	}
-	workflows, _, err := p.Host().Workflows().List(ctx, workspaceID, pluginsdk.Page{})
+	workflows, err := listWorkspaceWorkflows(ctx, p.Host().Workflows(), workspaceID)
 	if err != nil {
 		return err
 	}

@@ -493,6 +493,77 @@ func TestHandleAction_WorkflowsList_ReturnsWorkflowsWithSteps(t *testing.T) {
 	require.Len(t, steps, 2)
 }
 
+type workflowPageResult struct {
+	workflows []pluginsdk.Workflow
+	pageInfo  *pluginsdk.PageInfo
+}
+
+type pagedWorkflowReader struct {
+	pages   map[string]workflowPageResult
+	cursors []string
+}
+
+func (r *pagedWorkflowReader) List(_ context.Context, _ string, page pluginsdk.Page) ([]pluginsdk.Workflow, *pluginsdk.PageInfo, error) {
+	r.cursors = append(r.cursors, page.Cursor)
+	result, found := r.pages[page.Cursor]
+	if !found {
+		return nil, nil, fmt.Errorf("unexpected workflow cursor %q", page.Cursor)
+	}
+	return result.workflows, result.pageInfo, nil
+}
+
+func (*pagedWorkflowReader) ListSteps(_ context.Context, workflowID string) ([]pluginsdk.WorkflowStep, error) {
+	return []pluginsdk.WorkflowStep{{ID: "step-" + workflowID, Name: "Step " + workflowID}}, nil
+}
+
+func workflowPage(prefix string, first, last int) []pluginsdk.Workflow {
+	workflows := make([]pluginsdk.Workflow, 0, last-first+1)
+	for i := first; i <= last; i++ {
+		workflows = append(workflows, pluginsdk.Workflow{ID: fmt.Sprintf("%s-%d", prefix, i), Name: fmt.Sprintf("Workflow %d", i)})
+	}
+	return workflows
+}
+
+func TestHandleAction_WorkflowsListExhaustsCursorPages(t *testing.T) {
+	p, host := newTestPlugin(t)
+	reader := &pagedWorkflowReader{pages: map[string]workflowPageResult{
+		"":       {workflows: workflowPage("wf", 1, 50), pageInfo: &pluginsdk.PageInfo{HasMore: true, NextCursor: "page-2"}},
+		"page-2": {workflows: workflowPage("wf", 51, 51), pageInfo: &pluginsdk.PageInfo{}},
+	}}
+	host.workflowReader = reader
+
+	out := handle(t, p, "workflows.list", "ws-1", "", nil)
+	workflows, ok := out["workflows"].([]any)
+	require.True(t, ok)
+	require.Len(t, workflows, 51)
+	require.Equal(t, "wf-51", workflows[50].(map[string]any)["id"])
+	require.Equal(t, []string{"", "page-2"}, reader.cursors)
+}
+
+func TestValidateMappingWorkflowAcceptsWorkflowBeyondFirstPage(t *testing.T) {
+	p, host := newTestPlugin(t)
+	reader := &pagedWorkflowReader{pages: map[string]workflowPageResult{
+		"":       {workflows: workflowPage("wf", 1, 50), pageInfo: &pluginsdk.PageInfo{HasMore: true, NextCursor: "page-2"}},
+		"page-2": {workflows: workflowPage("wf", 51, 51), pageInfo: &pluginsdk.PageInfo{}},
+	}}
+	host.workflowReader = reader
+
+	err := p.validateMappingWorkflow(context.Background(), "ws-1", fieldmapping.Mapping{WorkflowID: "wf-51"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"", "page-2"}, reader.cursors)
+}
+
+func TestListWorkspaceWorkflowsRejectsRepeatedCursor(t *testing.T) {
+	reader := &pagedWorkflowReader{pages: map[string]workflowPageResult{
+		"":       {pageInfo: &pluginsdk.PageInfo{HasMore: true, NextCursor: "page-2"}},
+		"page-2": {pageInfo: &pluginsdk.PageInfo{HasMore: true, NextCursor: "page-2"}},
+	}}
+
+	_, err := listWorkspaceWorkflows(context.Background(), reader, "ws-1")
+	require.EqualError(t, err, `workflow pagination repeated cursor "page-2"`)
+	require.Equal(t, []string{"", "page-2"}, reader.cursors)
+}
+
 func TestHandleAction_WatchesRejectForgedInvalidOrUnselectedInputs(t *testing.T) {
 	p, _ := newTestPlugin(t)
 	for _, body := range []map[string]any{

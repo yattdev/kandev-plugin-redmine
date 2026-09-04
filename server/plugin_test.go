@@ -28,12 +28,13 @@ import (
 type fakeHost struct {
 	pluginsdk.UnimplementedHostData
 
-	mu      sync.Mutex
-	state   map[string]map[string]any
-	secrets map[string]string
-	updates []pluginsdk.UpdateTaskInput
-	tasks   map[string]*pluginsdk.Task
-	nextID  int
+	mu             sync.Mutex
+	state          map[string]map[string]any
+	secrets        map[string]string
+	updates        []pluginsdk.UpdateTaskInput
+	tasks          map[string]*pluginsdk.Task
+	nextID         int
+	workflowReader pluginsdk.WorkflowReader
 }
 
 func newFakeHost() *fakeHost {
@@ -114,7 +115,12 @@ func (h *fakeHost) Tasks() pluginsdk.TaskReader {
 	return fakeTaskReader{TaskReader: pluginsdk.UnimplementedHostData{}.Tasks(), host: h}
 }
 
-func (h *fakeHost) Workflows() pluginsdk.WorkflowReader { return fakeWorkflowReader{} }
+func (h *fakeHost) Workflows() pluginsdk.WorkflowReader {
+	if h.workflowReader != nil {
+		return h.workflowReader
+	}
+	return fakeWorkflowReader{}
+}
 
 func (h *fakeHost) PluginOwnedTaskTrees() pluginsdk.PluginOwnedTaskTreeManager {
 	return fakeTaskTreeManager{host: h}
