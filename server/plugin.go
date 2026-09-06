@@ -207,6 +207,12 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 				return err
 			}
 		}
+		if mappingFound {
+			// Priority mappings are workspace settings, unlike a watch's
+			// placement. Resolve them on every poll so new watcher tasks use a
+			// changed setting without requiring each watch to be edited.
+			w = applyWatchPriorityMapping(w, mapping)
+		}
 		if err := p.watchSvc.Poll(ctx, w, issuesSvc); err != nil {
 			return err
 		}
@@ -215,7 +221,7 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 }
 
 func needsWatchBackfill(w watch.Watch) bool {
-	return w.WorkflowID == "" || (w.StatusID != nil && w.WorkflowStepID == "") || w.PriorityMappings == nil
+	return w.WorkflowID == "" || (w.StatusID != nil && w.WorkflowStepID == "")
 }
 
 func applyWatchMapping(w watch.Watch, mapping fieldmapping.Mapping) watch.Watch {
@@ -223,6 +229,10 @@ func applyWatchMapping(w watch.Watch, mapping fieldmapping.Mapping) watch.Watch 
 	if w.StatusID != nil {
 		w.WorkflowStepID, _ = mapping.WorkflowStepForStatus(*w.StatusID)
 	}
+	return applyWatchPriorityMapping(w, mapping)
+}
+
+func applyWatchPriorityMapping(w watch.Watch, mapping fieldmapping.Mapping) watch.Watch {
 	w.PriorityMappings = make(map[int]string, len(mapping.Priorities))
 	for _, priority := range mapping.Priorities {
 		w.PriorityMappings[priority.RedminePriorityID] = priority.TaskPriority

@@ -755,6 +755,15 @@ func TestApplyWatchMapping_BackfillsLegacyWatchPlacementAndAttributes(t *testing
 	require.False(t, needsWatchBackfill(backfilled))
 }
 
+func TestApplyWatchPriorityMapping_RefreshesChangedWorkspacePriority(t *testing.T) {
+	watchObj := watch.Watch{PriorityMappings: map[int]string{4: "high"}}
+	refreshed := applyWatchPriorityMapping(watchObj, fieldmapping.Mapping{
+		Priorities: []fieldmapping.PriorityMapping{{RedminePriorityID: 4, TaskPriority: "low"}},
+	})
+
+	require.Equal(t, "low", refreshed.PriorityMappings[4])
+}
+
 func TestOnEvent_TaskMoved_AutoWritebackEnabled_PushesStatus(t *testing.T) {
 	p, _ := newTestPlugin(t)
 

@@ -63,7 +63,7 @@ test("configures the per-workspace Redmine connection and captures validation UI
 
   const mapping = await invokeAction(request, workspaceId, "fieldmapping.get");
   expect(Array.isArray(mapping.live_statuses)).toBeTruthy();
-  expect(mapping.live_priorities).toBeUndefined();
+  expect(Array.isArray(mapping.live_priorities)).toBeTruthy();
   expect(Array.isArray(mapping.custom_fields)).toBeTruthy();
   expect((mapping.custom_fields as JsonRecord[]).some((field) => String(field.name).length > 0)).toBeTruthy();
   expect(mapping.custom_fields_derived).toBe(true);
@@ -293,6 +293,21 @@ test("configures the per-workspace Redmine connection and captures validation UI
   await expect(page.getByTestId("redmine-mapping-workflow")).toBeVisible();
   await expect(page.locator("#redmine-status-mapping-table tbody tr")).toHaveCount(2);
 
+  const mappingPriorities = mapping.live_priorities as JsonRecord[];
+  expect(mappingPriorities.length).toBeGreaterThan(0);
+  const mappedPriority = mappingPriorities[0];
+  await page.getByTestId(`redmine-priority-map-${mappedPriority.id}`).click();
+  await page.getByRole("option", { name: "high", exact: true }).click();
+  await page.getByTestId("redmine-fieldmapping-save").click();
+  await expect
+    .poll(async () => {
+      const current = await invokeAction(request, workspaceId, "fieldmapping.get");
+      return (current.priorities as JsonRecord[]).find(
+        (priority) => Number(priority.redmine_priority_id) === Number(mappedPriority.id),
+      )?.task_priority;
+    })
+    .toBe("high");
+
   const unusedStatus = liveStatuses.find(
     (status) => Number(status.id) !== statusID && Number(status.id) !== secondStatusID,
   );
@@ -397,6 +412,8 @@ test("configures the per-workspace Redmine connection and captures validation UI
       { timeout: 20_000, intervals: [1_000, 2_000] },
     )
     .toBe(1);
+  const watcherTask = await responseJSON(await request.get(`/api/v1/tasks/${watcherTaskIDs[0]}`));
+  expect(watcherTask.priority).toBe("high");
   expect(await invokeAction(request, workspaceId, "watches.poll")).toEqual({ polled: true });
   const afterDuplicatePoll = await responseJSON(
     await request.get(`/api/v1/workspaces/${workspaceId}/tasks`),
