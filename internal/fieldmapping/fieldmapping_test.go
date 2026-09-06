@@ -62,6 +62,15 @@ func TestDeriveCustomFieldsFromIssues_UnionsAndDedupsByID(t *testing.T) {
 	require.ElementsMatch(t, []int{1, 2, 3}, ids)
 }
 
+func TestDeriveCustomFieldsFromIssues_PreservesKnownNameWhenLaterObservationOmitsIt(t *testing.T) {
+	fields := DeriveCustomFieldsFromIssues([][]CustomField{
+		{{ID: 7, Name: "Customer tier"}},
+		{{ID: 7, Name: ""}},
+	})
+
+	require.Equal(t, []CustomField{{ID: 7, Name: "Customer tier"}}, fields)
+}
+
 func TestDeriveCustomFieldsFromIssues_NoIssues_ReturnsEmpty(t *testing.T) {
 	fields := DeriveCustomFieldsFromIssues(nil)
 	require.Empty(t, fields)

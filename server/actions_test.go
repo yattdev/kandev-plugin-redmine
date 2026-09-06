@@ -694,6 +694,37 @@ func TestHandleAction_FieldMappingSaveValidatesAndNormalizesLiveValues(t *testin
 	require.NotEmpty(t, handle(t, p, "fieldmapping.save", "ws-1", "", invalidPriority)["error"])
 }
 
+func TestHandleAction_FieldMappingGet_NonAdminDerivesNamedCustomField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/current.json":
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case "/issue_statuses.json":
+			_, _ = w.Write([]byte(`{"issue_statuses":[]}`))
+		case "/enumerations/issue_priorities.json":
+			_, _ = w.Write([]byte(`{"issue_priorities":[]}`))
+		case "/custom_fields.json":
+			w.WriteHeader(http.StatusForbidden)
+		case "/issues.json":
+			require.Equal(t, "*", r.URL.Query().Get("status_id"))
+			_, _ = w.Write([]byte(`{"issues":[
+				{"id":1,"custom_fields":[{"id":7,"name":"Customer tier","value":"Gold"}]},
+				{"id":2,"custom_fields":[{"id":7,"value":"Silver"}]}
+			],"total_count":2}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p, _ := newTestPlugin(t)
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+	loaded := handle(t, p, "fieldmapping.get", "ws-1", "", nil)
+
+	require.Equal(t, true, loaded["custom_fields_derived"])
+	require.Equal(t, []any{map[string]any{"id": float64(7), "name": "Customer tier"}}, loaded["custom_fields"])
+}
+
 func TestHandleAction_SyncOptionsGetRoundTripsAndPreservesOtherToggle(t *testing.T) {
 	p, _ := newTestPlugin(t)
 	handle(t, p, "syncoptions.save", "ws-1", "", map[string]any{"auto_status_writeback": true, "sync_title_description": false})
