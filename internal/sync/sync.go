@@ -178,11 +178,9 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 }
 
 type inboundPlan struct {
-	update               pluginsdk.UpdateTaskInput
-	changed              bool
-	consumeStatusEcho    bool
-	desiredTrackerLabel  string
-	trackerMarkerChanged bool
+	update            pluginsdk.UpdateTaskInput
+	changed           bool
+	consumeStatusEcho bool
 }
 
 func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, issue issues.Issue, mapping fieldmapping.Mapping, opts Options) inboundPlan {
@@ -200,27 +198,10 @@ func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, is
 		plan.update.Priority = &priority
 		plan.changed = true
 	}
-	plan.desiredTrackerLabel, _ = mapping.TaskLabelForTracker(issue.TrackerID)
-	labels := reconcileTrackerLabels(task.Labels, link.AppliedTrackerLabel, plan.desiredTrackerLabel)
-	if !stringSlicesEqual(labels, task.Labels) {
-		plan.update.Labels = &labels
-		plan.changed = true
-	}
-	// Do not claim an identical pre-existing user label as plugin-owned when
-	// a manually linked task has no ownership marker. We persist ownership
-	// only when this reconciliation actually changes labels, or when replacing
-	// or clearing an existing marker.
-	plan.trackerMarkerChanged = plan.update.Labels != nil ||
-		(link.AppliedTrackerLabel != "" && link.AppliedTrackerLabel != plan.desiredTrackerLabel)
 	return plan
 }
 
 func (s *Service) finishInbound(ctx context.Context, taskID string, plan inboundPlan) error {
-	if plan.trackerMarkerChanged {
-		if err := s.tasklink.RecordAppliedTrackerLabel(ctx, taskID, plan.desiredTrackerLabel); err != nil {
-			return err
-		}
-	}
 	if plan.consumeStatusEcho {
 		return s.tasklink.ConsumeStatusEcho(ctx, taskID)
 	}
@@ -238,47 +219,6 @@ func applyTitleAndDescriptionInbound(update *pluginsdk.UpdateTaskInput, issue is
 		changed = true
 	}
 	return changed
-}
-
-// reconcileTrackerLabels removes only the previously plugin-owned label and
-// adds the desired mapping if absent. Every unrelated label and its order are
-// preserved exactly.
-func reconcileTrackerLabels(current []string, appliedMarker, desiredLabel string) []string {
-	if appliedMarker == desiredLabel && (desiredLabel == "" || containsLabel(current, desiredLabel)) {
-		return append([]string(nil), current...)
-	}
-	out := make([]string, 0, len(current)+1)
-	for _, label := range current {
-		if appliedMarker != "" && label == appliedMarker {
-			continue
-		}
-		out = append(out, label)
-	}
-	if desiredLabel != "" && !containsLabel(out, desiredLabel) {
-		out = append(out, desiredLabel)
-	}
-	return out
-}
-
-func containsLabel(labels []string, want string) bool {
-	for _, label := range labels {
-		if label == want {
-			return true
-		}
-	}
-	return false
-}
-
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // PushWriteback issues an outbound status PUT when a linked task moves to a

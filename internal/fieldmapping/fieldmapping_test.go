@@ -13,9 +13,6 @@ func TestService_SaveAndGet_RoundTrips(t *testing.T) {
 		Statuses: []StatusMapping{
 			{RedmineStatusID: 2, RedmineName: "Shipped", IsClosed: true, WorkflowStepID: "step-done"},
 		},
-		Trackers: []TrackerMapping{
-			{RedmineTrackerID: 1, RedmineName: "Defect", TaskLabel: "bug"},
-		},
 		Priorities: []PriorityMapping{
 			{RedminePriorityID: 1, RedmineName: "Urgent", TaskPriority: "critical"},
 		},
@@ -96,20 +93,24 @@ func TestStatusForWorkflowStep_ResolvesOutboundDirection(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestTaskLabelForTracker_ResolvesConfiguredNonEmptyMapping(t *testing.T) {
-	m := Mapping{Trackers: []TrackerMapping{
-		{RedmineTrackerID: 3, TaskLabel: "bug"},
-		{RedmineTrackerID: 4, TaskLabel: ""},
-	}}
+func TestMappingIgnoresLegacyTrackerLabelState(t *testing.T) {
+	mapping := mappingFromMap(map[string]any{
+		"workflow_id": "wf-1",
+		"trackers": []any{map[string]any{
+			"redmine_tracker_id": float64(3),
+			"redmine_name":       "Bug",
+			"task_label":         "bug",
+		}},
+		"priorities": []any{map[string]any{
+			"redmine_priority_id": float64(4),
+			"redmine_name":        "High",
+			"task_priority":       "high",
+		}},
+	})
 
-	label, ok := m.TaskLabelForTracker(3)
-	require.True(t, ok)
-	require.Equal(t, "bug", label)
-
-	_, ok = m.TaskLabelForTracker(4)
-	require.False(t, ok)
-	_, ok = m.TaskLabelForTracker(99)
-	require.False(t, ok)
+	require.Equal(t, "wf-1", mapping.WorkflowID)
+	require.Len(t, mapping.Priorities, 1)
+	require.NotContains(t, mapping.toMap(), "trackers")
 }
 
 func TestTaskPriorityForRedminePriority_ResolvesConfiguredNonEmptyMapping(t *testing.T) {
