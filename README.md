@@ -25,9 +25,10 @@ verification trace is [docs/spec.md](docs/spec.md).
 - **Project and field mapping** — statuses, trackers, and priorities are always
   fetched live from the instance. Users choose a workspace workflow, add only
   the Redmine statuses they want to map, and select a Kandev step for each;
-  task priorities remain configurable and nothing is hardcoded. Trackers stay
-  available for Redmine issue fields and watcher filters, but the Host task
-  contract does not allow plugins to mutate Kandev labels.
+  Redmine priorities remain available for issue fields and watcher filters,
+  while Kandev task priority is read-only in the current Host plugin API.
+  Trackers stay available for Redmine issue fields and watcher filters, but
+  the Host task contract does not allow plugins to mutate Kandev labels.
 - **Issue read/write** — always sends `status_id=*` (Redmine defaults to
   open-only), with attachments via the two-step upload-token flow.
 - **Task linking** — `registerTaskAction({placement:"link"})` +
