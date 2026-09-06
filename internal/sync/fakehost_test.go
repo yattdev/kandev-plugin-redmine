@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // fakeHost is an in-memory pluginsdk.Host test double with a capturing
@@ -17,7 +19,9 @@ type fakeHost struct {
 	mu        sync.Mutex
 	state     map[string]map[string]any
 	updates   []pluginsdk.UpdateTaskInput
+	moves     []pluginsdk.MoveTaskInput
 	updateErr error
+	moveErr   error
 	task      pluginsdk.Task
 }
 
@@ -78,9 +82,15 @@ func (h *fakeHost) updateCalls() []pluginsdk.UpdateTaskInput {
 	return append([]pluginsdk.UpdateTaskInput(nil), h.updates...)
 }
 
+func (h *fakeHost) moveCalls() []pluginsdk.MoveTaskInput {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]pluginsdk.MoveTaskInput(nil), h.moves...)
+}
+
 // fakeTaskReader embeds the SDK's own unimplemented TaskReader (via
 // UnimplementedHostData{}.Tasks()) so List/Get/Create fall through to its
-// defaults; only Update is overridden, since that's all internal/sync calls.
+// defaults; Update and Move are overridden to enforce the Host write contract.
 type fakeTaskReader struct {
 	pluginsdk.TaskReader
 	host *fakeHost
@@ -91,6 +101,9 @@ func (r fakeTaskReader) Update(_ context.Context, in pluginsdk.UpdateTaskInput) 
 	r.host.updates = append(r.host.updates, in)
 	err := r.host.updateErr
 	r.host.mu.Unlock()
+	if in.WorkflowStepID != nil {
+		return nil, status.Error(codes.InvalidArgument, "workflow_step_id must be changed with Move")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -103,6 +116,17 @@ func (r fakeTaskReader) Update(_ context.Context, in pluginsdk.UpdateTaskInput) 
 	}
 	r.host.mu.Unlock()
 	return &pluginsdk.Task{ID: in.ID}, nil
+}
+
+func (r fakeTaskReader) Move(_ context.Context, in pluginsdk.MoveTaskInput) (*pluginsdk.MoveTaskOutcome, error) {
+	r.host.mu.Lock()
+	r.host.moves = append(r.host.moves, in)
+	err := r.host.moveErr
+	r.host.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return &pluginsdk.MoveTaskOutcome{Task: &pluginsdk.Task{ID: in.TaskID}, Transitioned: true}, nil
 }
 
 func (r fakeTaskReader) Get(_ context.Context, id string) (*pluginsdk.Task, error) {

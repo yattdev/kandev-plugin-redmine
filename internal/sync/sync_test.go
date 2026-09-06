@@ -47,11 +47,15 @@ func TestPollInbound_LinkedIssueStatusChange_MovesTaskToMappedStep(t *testing.T)
 	err := svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{})
 	require.NoError(t, err)
 
-	calls := host.updateCalls()
+	calls := host.moveCalls()
 	require.Len(t, calls, 1)
-	require.Equal(t, "task-1", calls[0].ID)
-	require.NotNil(t, calls[0].WorkflowStepID)
-	require.Equal(t, "step-done", *calls[0].WorkflowStepID)
+	require.Equal(t, "task-1", calls[0].TaskID)
+	require.Equal(t, "step-done", calls[0].WorkflowStepID)
+	require.Empty(t, host.updateCalls(), "workflow step changes must not use Update")
+	cursor, found, err := host.GetState(context.Background(), stateScope, "ws-1", cursorKey)
+	require.NoError(t, err)
+	require.True(t, found, "a successful Move must still advance the inbound cursor")
+	require.Equal(t, "2026-01-01T00:00:00Z", cursor["updated_on"])
 }
 
 func TestPollInbound_UnlinkedIssue_DoesNotTouchAnyTask(t *testing.T) {
@@ -71,11 +75,12 @@ func TestPollInbound_UnlinkedIssue_DoesNotTouchAnyTask(t *testing.T) {
 	err := svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{})
 	require.NoError(t, err)
 	require.Empty(t, host.updateCalls())
+	require.Empty(t, host.moveCalls())
 }
 
 func TestPollInbound_NotFoundTaskSelfHealsStaleLink(t *testing.T) {
 	host := newFakeHost()
-	host.updateErr = status.Error(codes.NotFound, "task deleted")
+	host.moveErr = status.Error(codes.NotFound, "task deleted")
 	tl := tasklink.New(host)
 	svc := New(host, tl)
 	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
@@ -108,10 +113,10 @@ func TestPollInbound_TitleDescriptionSync_OnlyWhenEnabled(t *testing.T) {
 		require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
 
 		require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{SyncTitleDescription: false}))
-		calls := host.updateCalls()
-		require.Len(t, calls, 1) // status still applies (mapped to step-backlog)
-		require.Nil(t, calls[0].Title)
-		require.Nil(t, calls[0].Description)
+		require.Empty(t, host.updateCalls())
+		moves := host.moveCalls()
+		require.Len(t, moves, 1) // status still applies (mapped to step-backlog)
+		require.Equal(t, "step-backlog", moves[0].WorkflowStepID)
 	})
 
 	t.Run("enabled: title/description update", func(t *testing.T) {
@@ -127,6 +132,10 @@ func TestPollInbound_TitleDescriptionSync_OnlyWhenEnabled(t *testing.T) {
 		require.Equal(t, "New subject", *calls[0].Title)
 		require.NotNil(t, calls[0].Description)
 		require.Equal(t, "New body", *calls[0].Description)
+		require.Nil(t, calls[0].WorkflowStepID, "fake Host rejects step changes on Update")
+		moves := host.moveCalls()
+		require.Len(t, moves, 1)
+		require.Equal(t, "step-backlog", moves[0].WorkflowStepID)
 	})
 }
 
@@ -159,10 +168,10 @@ func TestPollInbound_OverlappedMappedStatusReconcilesWithoutReadableStep(t *test
 	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
-	require.Len(t, host.updateCalls(), 2)
-	for _, call := range host.updateCalls() {
-		require.NotNil(t, call.WorkflowStepID)
-		require.Equal(t, "step-done", *call.WorkflowStepID)
+	require.Empty(t, host.updateCalls())
+	require.Len(t, host.moveCalls(), 2)
+	for _, call := range host.moveCalls() {
+		require.Equal(t, "step-done", call.WorkflowStepID)
 	}
 }
 
@@ -176,7 +185,8 @@ func TestPollInbound_ManualMoveAwayIsRestoredFromMappedRedmineStatus(t *testing.
 	}))
 	defer srv.Close()
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
-	require.Len(t, host.updateCalls(), 1)
+	require.Empty(t, host.updateCalls())
+	require.Len(t, host.moveCalls(), 1)
 }
 
 func TestPollInbound_PriorityMappingDoesNotWriteUnsupportedTaskPriority(t *testing.T) {
