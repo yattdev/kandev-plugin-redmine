@@ -122,10 +122,17 @@ func TestMappingIgnoresLegacyTrackerLabelState(t *testing.T) {
 	require.NotContains(t, mapping.toMap(), "trackers")
 }
 
-func TestMappingReadsLegacyPriorityRowsWithoutApplyingThem(t *testing.T) {
-	mapping := mappingFromMap(map[string]any{"priorities": []any{map[string]any{
-		"redmine_priority_id": float64(4), "redmine_name": "High", "task_priority": "high",
-	}}})
+func TestTaskPriorityForRedminePriority_ResolvesConfiguredNonEmptyMapping(t *testing.T) {
+	mapping := Mapping{Priorities: []PriorityMapping{
+		{RedminePriorityID: 4, TaskPriority: "high"},
+		{RedminePriorityID: 5, TaskPriority: ""},
+	}}
 
-	require.Equal(t, []PriorityMapping{{RedminePriorityID: 4, RedmineName: "High", TaskPriority: "high"}}, mapping.Priorities)
+	priority, ok := mapping.TaskPriorityForRedminePriority(4)
+	require.True(t, ok)
+	require.Equal(t, "high", priority)
+	_, ok = mapping.TaskPriorityForRedminePriority(5)
+	require.False(t, ok)
+	_, ok = mapping.TaskPriorityForRedminePriority(99)
+	require.False(t, ok)
 }

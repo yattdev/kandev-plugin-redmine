@@ -208,6 +208,10 @@ func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, is
 	if opts.SyncTitleDescription {
 		plan.updateChanged = applyTitleAndDescriptionInbound(&plan.update, issue, task)
 	}
+	if priority, ok := mapping.TaskPriorityForRedminePriority(issue.PriorityID); ok && task.Priority != priority {
+		plan.update.Priority = &priority
+		plan.updateChanged = true
+	}
 	return plan
 }
 

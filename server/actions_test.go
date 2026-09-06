@@ -663,6 +663,8 @@ func TestHandleAction_FieldMappingSaveValidatesAndNormalizesLiveValues(t *testin
 			_, _ = w.Write([]byte(`{"issue_statuses":[{"id":1,"name":"Server Open","is_closed":false}]}`))
 		case "/trackers.json":
 			w.WriteHeader(http.StatusInternalServerError)
+		case "/enumerations/issue_priorities.json":
+			_, _ = w.Write([]byte(`{"issue_priorities":[{"id":3,"name":"Server High"}]}`))
 		case "/custom_fields.json":
 			_, _ = w.Write([]byte(`{"custom_fields":[]}`))
 		default:
@@ -672,10 +674,7 @@ func TestHandleAction_FieldMappingSaveValidatesAndNormalizesLiveValues(t *testin
 	defer srv.Close()
 	p, _ := newTestPlugin(t)
 	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
-	// A mapping created before task priority became read-only remains intact
-	// when the operator saves the current status-only configuration.
-	require.NoError(t, p.fieldmappingSvc.Save(context.Background(), "ws-1", fieldmapping.Mapping{Priorities: []fieldmapping.PriorityMapping{{RedminePriorityID: 3, RedmineName: "Legacy High", TaskPriority: "high"}}}))
-	base := map[string]any{"workflow_id": "wf-1", "statuses": []any{map[string]any{"redmine_status_id": 1, "redmine_name": "forged", "is_closed": true, "workflow_step_id": "step-done"}}, "trackers": []any{map[string]any{"redmine_tracker_id": 2, "redmine_name": "legacy", "task_label": "bug"}}}
+	base := map[string]any{"workflow_id": "wf-1", "statuses": []any{map[string]any{"redmine_status_id": 1, "redmine_name": "forged", "is_closed": true, "workflow_step_id": "step-done"}}, "trackers": []any{map[string]any{"redmine_tracker_id": 2, "redmine_name": "legacy", "task_label": "bug"}}, "priorities": []any{map[string]any{"redmine_priority_id": 3, "redmine_name": "forged", "task_priority": "high"}}}
 	require.Equal(t, true, handle(t, p, "fieldmapping.save", "ws-1", "", base)["saved"])
 	mapping, found, err := p.fieldmappingSvc.Get(context.Background(), "ws-1")
 	require.NoError(t, err)
@@ -685,16 +684,16 @@ func TestHandleAction_FieldMappingSaveValidatesAndNormalizesLiveValues(t *testin
 	encodedMapping, err := json.Marshal(mapping)
 	require.NoError(t, err)
 	require.NotContains(t, string(encodedMapping), `"trackers"`)
-	require.Equal(t, "Legacy High", mapping.Priorities[0].RedmineName)
+	require.Equal(t, "Server High", mapping.Priorities[0].RedmineName)
 	loaded := handle(t, p, "fieldmapping.get", "ws-1", "", nil)
 	require.NotContains(t, loaded, "trackers")
 	require.NotContains(t, loaded, "live_trackers")
-	require.NotContains(t, loaded, "priorities")
-	require.NotContains(t, loaded, "live_priorities")
+	require.Contains(t, loaded, "priorities")
+	require.Contains(t, loaded, "live_priorities")
 	duplicate := map[string]any{"workflow_id": "wf-1", "statuses": []any{map[string]any{"redmine_status_id": 1}, map[string]any{"redmine_status_id": 1}}}
 	require.NotEmpty(t, handle(t, p, "fieldmapping.save", "ws-1", "", duplicate)["error"])
-	unsupportedPriority := map[string]any{"workflow_id": "wf-1", "priorities": []any{map[string]any{"redmine_priority_id": 3, "task_priority": "high"}}}
-	require.Contains(t, handle(t, p, "fieldmapping.save", "ws-1", "", unsupportedPriority)["error"], "priority mappings are unsupported")
+	invalidPriority := map[string]any{"workflow_id": "wf-1", "priorities": []any{map[string]any{"redmine_priority_id": 3, "task_priority": "urgent"}}}
+	require.NotEmpty(t, handle(t, p, "fieldmapping.save", "ws-1", "", invalidPriority)["error"])
 }
 
 func TestHandleAction_FieldMappingGet_NonAdminDerivesNamedCustomField(t *testing.T) {
@@ -741,16 +740,18 @@ func TestHandleAction_SyncOptionsGetRoundTripsAndPreservesOtherToggle(t *testing
 	require.Equal(t, true, loaded["sync_title_description"])
 }
 
-func TestApplyWatchMapping_BackfillsLegacyWatchPlacementWithoutPriorityMapping(t *testing.T) {
+func TestApplyWatchMapping_BackfillsLegacyWatchPlacementAndAttributes(t *testing.T) {
 	statusID := 5
 	legacy := watch.Watch{ID: "legacy", WorkspaceID: "ws-1", ProjectID: 1, StatusID: &statusID}
 	require.True(t, needsWatchBackfill(legacy))
 	backfilled := applyWatchMapping(legacy, fieldmapping.Mapping{
 		WorkflowID: "wf-secondary",
 		Statuses:   []fieldmapping.StatusMapping{{RedmineStatusID: 5, WorkflowStepID: "step-triage"}},
+		Priorities: []fieldmapping.PriorityMapping{{RedminePriorityID: 4, TaskPriority: "high"}},
 	})
 	require.Equal(t, "wf-secondary", backfilled.WorkflowID)
 	require.Equal(t, "step-triage", backfilled.WorkflowStepID)
+	require.Equal(t, "high", backfilled.PriorityMappings[4])
 	require.False(t, needsWatchBackfill(backfilled))
 }
 

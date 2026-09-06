@@ -39,9 +39,8 @@ workspace's state.
 3. Fetch statuses, trackers, priorities, and custom fields from the connected
    Redmine instance rather than hardcoding instance-specific values. The user
    selects a workspace workflow, explicitly adds live Redmine statuses, and
-   selects a Kandev step for each added status. Redmine priorities remain
-   available for Redmine issue fields and watcher filters; task priority is
-   read-only in the current Host plugin API. Trackers remain available for Redmine issue fields and
+   selects a Kandev step for each added status. Priorities may map to Kandev
+   task priorities. Trackers remain available for Redmine issue fields and
    watcher filters, not Kandev task-label mutation. If custom fields cannot
    be listed, derive them from recent issues.
 4. Create and update issues, including Redmine's upload-token attachment flow.
@@ -52,10 +51,11 @@ workspace's state.
 7. Apply mapped inbound status updates; optionally synchronize title and
    description. A plugin-originated outbound status must not bounce back as an
    inbound task transition.
-8. Preserve Kandev task priority as read-only: the current Host plugin API
-   does not allow a plugin to create or update it. Kandev task labels are a
-   deprecated read-side compatibility field in the Host plugin contract: this
-   plugin must not create, update, claim ownership of, or clean up task labels.
+8. Apply configured priority mappings both at watcher task creation and during
+   inbound synchronization of already-linked tasks. Kandev task labels are a
+   deprecated read-side compatibility field in the Host plugin contract:
+   this plugin must not create, update, claim ownership of, or clean up task
+   labels.
 9. Write a mapped status on `task.moved` only when automatic write-back is
    enabled. Manual write-back remains available when it is disabled.
 10. Search Redmine issues in the composer and reauthorize a selected reference
@@ -80,7 +80,7 @@ workspace's state.
 | Workspace enable/disable without credential loss | `integration.enabled.get/save` | verified workspace action context; state RPC | `internal/connection/connection_test.go`, `server/actions_test.go`, `ui/e2e/live-redmine.spec.ts` |
 | Health and retry behavior | `connection.HealthPoller` | state/secrets RPCs | `internal/connection/healthpoll_test.go`, `internal/redmineclient/client_test.go` |
 | Project pagination and selected projects | `projects.list/save` | workspace action context; state RPC | `internal/projects/projects_test.go` |
-| Live status mapping and custom-field fallback | `fieldmapping.get/save` | workspace action context; workflows read RPC | `internal/fieldmapping/fieldmapping_test.go` |
+| Live status/priority mapping and custom-field fallback | `fieldmapping.get/save` | workspace action context; workflows read RPC | `internal/fieldmapping/fieldmapping_test.go` |
 | Issue search, writes, and upload tokens | Redmine client and issue service | authenticated action/reference context | `internal/redmineclient/search_test.go`, `internal/issues/issues_test.go` |
 | Link, unlink, and native link surface | `link.*`; UI registration | task action and `openTaskLinkDialog` | `internal/tasklink/tasklink_test.go`, `server/actions_test.go`, `server/plugin_test.go` |
 | Closed-status inbound sync, cursor, title/description option, echo suppression | sync poller | task read/write RPCs | `internal/sync/sync_test.go` |

@@ -189,7 +189,7 @@ func TestPollInbound_ManualMoveAwayIsRestoredFromMappedRedmineStatus(t *testing.
 	require.Len(t, host.moveCalls(), 1)
 }
 
-func TestPollInbound_PriorityMappingDoesNotWriteUnsupportedTaskPriority(t *testing.T) {
+func TestPollInbound_AppliesPriorityWithoutChangingWorkflowStep(t *testing.T) {
 	host := newFakeHost()
 	tl := tasklink.New(host)
 	svc := New(host, tl)
@@ -201,12 +201,15 @@ func TestPollInbound_PriorityMappingDoesNotWriteUnsupportedTaskPriority(t *testi
 	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
 
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
-	require.Empty(t, host.updateCalls())
+	require.Len(t, host.updateCalls(), 1)
+	require.NotNil(t, host.updateCalls()[0].Priority)
+	require.Equal(t, "high", *host.updateCalls()[0].Priority)
+	require.Equal(t, "high", host.task.Priority)
+	require.Empty(t, host.moveCalls())
 
-	// Priority is read-only in the current Host SDK, so a mapping alone does
-	// not produce an unsupported update.
+	// The overlap poll is idempotent once the task priority agrees with Redmine.
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
-	require.Empty(t, host.updateCalls())
+	require.Len(t, host.updateCalls(), 1)
 }
 
 func TestPollInbound_TrackerDifferenceAloneDoesNotUpdateTask(t *testing.T) {

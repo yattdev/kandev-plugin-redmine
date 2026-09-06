@@ -114,6 +114,9 @@ func (r fakeTaskReader) Update(_ context.Context, in pluginsdk.UpdateTaskInput) 
 	if in.Description != nil {
 		r.host.task.Description = *in.Description
 	}
+	if in.Priority != nil {
+		r.host.task.Priority = *in.Priority
+	}
 	r.host.mu.Unlock()
 	return &pluginsdk.Task{ID: in.ID}, nil
 }

@@ -215,13 +215,17 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 }
 
 func needsWatchBackfill(w watch.Watch) bool {
-	return w.WorkflowID == "" || (w.StatusID != nil && w.WorkflowStepID == "")
+	return w.WorkflowID == "" || (w.StatusID != nil && w.WorkflowStepID == "") || w.PriorityMappings == nil
 }
 
 func applyWatchMapping(w watch.Watch, mapping fieldmapping.Mapping) watch.Watch {
 	w.WorkflowID = mapping.WorkflowID
 	if w.StatusID != nil {
 		w.WorkflowStepID, _ = mapping.WorkflowStepForStatus(*w.StatusID)
+	}
+	w.PriorityMappings = make(map[int]string, len(mapping.Priorities))
+	for _, priority := range mapping.Priorities {
+		w.PriorityMappings[priority.RedminePriorityID] = priority.TaskPriority
 	}
 	return w
 }
