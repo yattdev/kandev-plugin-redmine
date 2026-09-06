@@ -141,13 +141,13 @@ func TestPollInbound_OverlappedUnchangedTitleDescriptionWritesOnce(t *testing.T)
 	defer srv.Close()
 	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
 	// Status 99 is deliberately unmapped, isolating title/description
-	// idempotency from the SDK's current lack of readable workflow step ID.
+	// idempotency from workflow-step reconciliation.
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{SyncTitleDescription: true}))
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{SyncTitleDescription: true}))
 	require.Len(t, host.updateCalls(), 1)
 }
 
-func TestPollInbound_OverlappedMappedStatusTransitionsOnlyOnce(t *testing.T) {
+func TestPollInbound_OverlappedMappedStatusReconcilesWithoutReadableStep(t *testing.T) {
 	host := newFakeHost()
 	tl := tasklink.New(host)
 	svc := New(host, tl)
@@ -159,13 +159,15 @@ func TestPollInbound_OverlappedMappedStatusTransitionsOnlyOnce(t *testing.T) {
 	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
-	require.Len(t, host.updateCalls(), 1)
-	require.Equal(t, "step-done", host.task.WorkflowStepID)
+	require.Len(t, host.updateCalls(), 2)
+	for _, call := range host.updateCalls() {
+		require.NotNil(t, call.WorkflowStepID)
+		require.Equal(t, "step-done", *call.WorkflowStepID)
+	}
 }
 
 func TestPollInbound_ManualMoveAwayIsRestoredFromMappedRedmineStatus(t *testing.T) {
 	host := newFakeHost()
-	host.task.WorkflowStepID = "step-other"
 	tl := tasklink.New(host)
 	svc := New(host, tl)
 	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
@@ -174,13 +176,11 @@ func TestPollInbound_ManualMoveAwayIsRestoredFromMappedRedmineStatus(t *testing.
 	}))
 	defer srv.Close()
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
-	require.Equal(t, "step-done", host.task.WorkflowStepID)
 	require.Len(t, host.updateCalls(), 1)
 }
 
-func TestPollInbound_AppliesPriorityWithoutChangingReadOnlyLabels(t *testing.T) {
+func TestPollInbound_PriorityMappingDoesNotWriteUnsupportedTaskPriority(t *testing.T) {
 	host := newFakeHost()
-	host.task.Labels = []string{"customer", "keep-order"}
 	tl := tasklink.New(host)
 	svc := New(host, tl)
 	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
@@ -191,19 +191,16 @@ func TestPollInbound_AppliesPriorityWithoutChangingReadOnlyLabels(t *testing.T) 
 	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
 
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
-	require.Len(t, host.updateCalls(), 1)
-	require.Equal(t, "high", host.task.Priority)
-	require.Equal(t, []string{"customer", "keep-order"}, host.task.Labels)
+	require.Empty(t, host.updateCalls())
 
-	// The overlap poll is fully idempotent once the supported priority field
-	// agrees with Redmine.
+	// Priority is read-only in the current Host SDK, so a mapping alone does
+	// not produce an unsupported update.
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
-	require.Len(t, host.updateCalls(), 1)
+	require.Empty(t, host.updateCalls())
 }
 
 func TestPollInbound_TrackerDifferenceAloneDoesNotUpdateTask(t *testing.T) {
 	host := newFakeHost()
-	host.task.Labels = []string{"customer", "bug", "keep-order"}
 	tl := tasklink.New(host)
 	svc := New(host, tl)
 	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
@@ -214,7 +211,6 @@ func TestPollInbound_TrackerDifferenceAloneDoesNotUpdateTask(t *testing.T) {
 
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client())), testMapping(), []int{1}, Options{}))
 	require.Empty(t, host.updateCalls())
-	require.Equal(t, []string{"customer", "bug", "keep-order"}, host.task.Labels)
 }
 
 func TestPollInbound_CursorAdvancesAndPersistsAcrossRestarts(t *testing.T) {

@@ -187,16 +187,16 @@ func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, is
 	plan := inboundPlan{update: pluginsdk.UpdateTaskInput{ID: taskID}}
 	plan.consumeStatusEcho = link.LastPushedStatusID != nil
 	statusEcho := link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
-	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok && !statusEcho && task.WorkflowStepID != stepID {
+	// The Host SDK permits setting a workflow step but does not expose the
+	// task's current workflow step on reads. Apply each non-echo mapped Redmine
+	// status observation so a task manually moved away is reconciled on the
+	// next poll.
+	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok && !statusEcho {
 		plan.update.WorkflowStepID = &stepID
 		plan.changed = true
 	}
 	if opts.SyncTitleDescription {
 		plan.changed = applyTitleAndDescriptionInbound(&plan.update, issue, task) || plan.changed
-	}
-	if priority, ok := mapping.TaskPriorityForRedminePriority(issue.PriorityID); ok && task.Priority != priority {
-		plan.update.Priority = &priority
-		plan.changed = true
 	}
 	return plan
 }

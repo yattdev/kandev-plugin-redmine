@@ -328,7 +328,6 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 		}(),
 		Title:       watcherTaskTitle(issue.ID, issue.Subject),
 		Description: issue.Description,
-		Priority:    w.PriorityMappings[issue.PriorityID],
 		Metadata: map[string]any{
 			metadataKeyWatchID: w.ID,
 			metadataKeyIssueID: issue.ID,

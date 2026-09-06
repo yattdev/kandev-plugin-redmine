@@ -163,7 +163,7 @@ func (r fakeTaskReader) Create(_ context.Context, in pluginsdk.CreateTaskInput) 
 	r.host.mu.Lock()
 	defer r.host.mu.Unlock()
 	r.host.nextID++
-	task := &pluginsdk.Task{ID: fmt.Sprintf("task-%d", r.host.nextID), WorkspaceID: in.WorkspaceID, Title: in.Title, Description: in.Description, State: "RUNNING", Priority: in.Priority, Metadata: in.Metadata}
+	task := &pluginsdk.Task{ID: fmt.Sprintf("task-%d", r.host.nextID), WorkspaceID: in.WorkspaceID, Title: in.Title, Description: in.Description, State: "RUNNING", Metadata: in.Metadata}
 	r.host.tasks[task.ID] = task
 	return task, nil
 }
