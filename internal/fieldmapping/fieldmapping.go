@@ -1,9 +1,9 @@
-// Package fieldmapping persists per-workspace status/tracker/priority
-// mapping from live Redmine field data to Kandev concepts, and derives
+// Package fieldmapping persists per-workspace status/priority mapping from
+// live Redmine field data to Kandev concepts, and derives
 // custom-field definitions from observed issues when /custom_fields.json is
-// unavailable to a non-admin API key. No status, tracker, or priority name
-// is ever hardcoded here — every mapping entry is built from data the caller
-// fetched live via internal/redmineclient.
+// unavailable to a non-admin API key. No status or priority name is ever
+// hardcoded here — every mapping entry is built from data the caller fetched
+// live via internal/redmineclient.
 package fieldmapping
 
 import (
@@ -21,13 +21,6 @@ type StatusMapping struct {
 	RedmineName     string `json:"redmine_name"`
 	IsClosed        bool   `json:"is_closed"`
 	WorkflowStepID  string `json:"workflow_step_id"`
-}
-
-// TrackerMapping maps one live Redmine tracker to a Kandev task label.
-type TrackerMapping struct {
-	RedmineTrackerID int    `json:"redmine_tracker_id"`
-	RedmineName      string `json:"redmine_name"`
-	TaskLabel        string `json:"task_label"`
 }
 
 // PriorityMapping maps one live Redmine priority to a Kandev task priority
@@ -50,7 +43,6 @@ type CustomField struct {
 type Mapping struct {
 	WorkflowID string            `json:"workflow_id"`
 	Statuses   []StatusMapping   `json:"statuses"`
-	Trackers   []TrackerMapping  `json:"trackers"`
 	Priorities []PriorityMapping `json:"priorities"`
 }
 
@@ -74,19 +66,6 @@ func (m Mapping) StatusForWorkflowStep(workflowStepID string) (int, bool) {
 		}
 	}
 	return 0, false
-}
-
-// TaskLabelForTracker resolves the inbound direction: a Redmine tracker ID
-// to the Kandev task label it maps to. Empty and absent mappings both resolve
-// as no desired label, allowing sync to remove only its previously owned
-// tracker label.
-func (m Mapping) TaskLabelForTracker(redmineTrackerID int) (string, bool) {
-	for _, t := range m.Trackers {
-		if t.RedmineTrackerID == redmineTrackerID {
-			return t.TaskLabel, t.TaskLabel != ""
-		}
-	}
-	return "", false
 }
 
 // TaskPriorityForRedminePriority resolves the inbound direction: a Redmine
@@ -173,14 +152,6 @@ func (m Mapping) toMap() map[string]any {
 			"workflow_step_id":  s.WorkflowStepID,
 		}
 	}
-	trackers := make([]any, len(m.Trackers))
-	for i, tr := range m.Trackers {
-		trackers[i] = map[string]any{
-			"redmine_tracker_id": tr.RedmineTrackerID,
-			"redmine_name":       tr.RedmineName,
-			"task_label":         tr.TaskLabel,
-		}
-	}
 	priorities := make([]any, len(m.Priorities))
 	for i, p := range m.Priorities {
 		priorities[i] = map[string]any{
@@ -192,7 +163,6 @@ func (m Mapping) toMap() map[string]any {
 	return map[string]any{
 		"workflow_id": m.WorkflowID,
 		"statuses":    statuses,
-		"trackers":    trackers,
 		"priorities":  priorities,
 	}
 }
@@ -209,17 +179,6 @@ func mappingFromMap(m map[string]any) Mapping {
 			RedmineName:     asString(row["redmine_name"]),
 			IsClosed:        asBool(row["is_closed"]),
 			WorkflowStepID:  asString(row["workflow_step_id"]),
-		})
-	}
-	for _, raw := range asSlice(m["trackers"]) {
-		row, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		out.Trackers = append(out.Trackers, TrackerMapping{
-			RedmineTrackerID: asInt(row["redmine_tracker_id"]),
-			RedmineName:      asString(row["redmine_name"]),
-			TaskLabel:        asString(row["task_label"]),
 		})
 	}
 	for _, raw := range asSlice(m["priorities"]) {

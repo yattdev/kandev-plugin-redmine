@@ -21,6 +21,7 @@ test("mapping selects use host controls and explicitly added live statuses", () 
   assert.match(bundle, /redmine-status-remove-\$\{status\.id\}/);
   assert.match(bundle, /Choose a workflow step for every added Redmine status/);
   assert.match(bundle, /redmine-priority-map-" \+ priority\.id/);
+  assert.doesNotMatch(bundle, /trackerLabels|task_label|redmine-tracker-label/);
 });
 
 test("integration registration supplies a branded icon and workspace enable action", () => {

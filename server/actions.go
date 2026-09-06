@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
 	"kandev-plugin-redmine/internal/connection"
 	"kandev-plugin-redmine/internal/fieldmapping"
@@ -288,10 +287,8 @@ func (p *redminePlugin) handleProjectsSave(ctx context.Context, req *pluginsdk.P
 type fieldMappingGetResponse struct {
 	WorkflowID          string                         `json:"workflow_id"`
 	Statuses            []fieldmapping.StatusMapping   `json:"statuses"`
-	Trackers            []fieldmapping.TrackerMapping  `json:"trackers"`
 	Priorities          []fieldmapping.PriorityMapping `json:"priorities"`
 	LiveStatuses        []redmineNamedRef              `json:"live_statuses"`
-	LiveTrackers        []redmineNamedRef              `json:"live_trackers"`
 	LivePriorities      []redmineNamedRef              `json:"live_priorities"`
 	CustomFields        []fieldmapping.CustomField     `json:"custom_fields"`
 	CustomFieldsDerived bool                           `json:"custom_fields_derived"`
@@ -313,10 +310,6 @@ func (p *redminePlugin) handleFieldMappingGet(ctx context.Context, req *pluginsd
 	if err != nil {
 		return classifiedErrorResponse(err)
 	}
-	liveTrackers, err := client.ListTrackers(ctx)
-	if err != nil {
-		return classifiedErrorResponse(err)
-	}
 	livePriorities, err := client.ListIssuePriorities(ctx)
 	if err != nil {
 		return classifiedErrorResponse(err)
@@ -334,9 +327,8 @@ func (p *redminePlugin) handleFieldMappingGet(ctx context.Context, req *pluginsd
 
 	return jsonResponse(fieldMappingGetResponse{
 		WorkflowID: mapping.WorkflowID,
-		Statuses:   mapping.Statuses, Trackers: mapping.Trackers, Priorities: mapping.Priorities,
+		Statuses:   mapping.Statuses, Priorities: mapping.Priorities,
 		LiveStatuses:        toNamedRefs(liveStatuses),
-		LiveTrackers:        toTrackerRefs(liveTrackers),
 		LivePriorities:      toPriorityRefs(livePriorities),
 		CustomFields:        customFields,
 		CustomFieldsDerived: derived,
@@ -403,10 +395,6 @@ func (p *redminePlugin) normalizeAndValidateMapping(ctx context.Context, client 
 	if err != nil {
 		return err
 	}
-	trackers, err := client.ListTrackers(ctx)
-	if err != nil {
-		return err
-	}
 	priorities, err := client.ListIssuePriorities(ctx)
 	if err != nil {
 		return err
@@ -415,15 +403,11 @@ func (p *redminePlugin) normalizeAndValidateMapping(ctx context.Context, client 
 	for _, value := range statuses {
 		statusByID[value.ID] = value
 	}
-	trackerByID := make(map[int]redmineclient.Tracker, len(trackers))
-	for _, value := range trackers {
-		trackerByID[value.ID] = value
-	}
 	priorityByID := make(map[int]redmineclient.Priority, len(priorities))
 	for _, value := range priorities {
 		priorityByID[value.ID] = value
 	}
-	seenStatuses, seenTrackers, seenPriorities := map[int]bool{}, map[int]bool{}, map[int]bool{}
+	seenStatuses, seenPriorities := map[int]bool{}, map[int]bool{}
 	for i := range mapping.Statuses {
 		item := &mapping.Statuses[i]
 		live, ok := statusByID[item.RedmineStatusID]
@@ -433,16 +417,6 @@ func (p *redminePlugin) normalizeAndValidateMapping(ctx context.Context, client 
 		seenStatuses[item.RedmineStatusID] = true
 		item.RedmineName = live.Name
 		item.IsClosed = live.IsClosed
-	}
-	for i := range mapping.Trackers {
-		item := &mapping.Trackers[i]
-		live, ok := trackerByID[item.RedmineTrackerID]
-		if item.RedmineTrackerID <= 0 || !ok || seenTrackers[item.RedmineTrackerID] {
-			return fmt.Errorf("redmine: tracker mapping id %d is invalid or duplicated", item.RedmineTrackerID)
-		}
-		seenTrackers[item.RedmineTrackerID] = true
-		item.RedmineName = live.Name
-		item.TaskLabel = strings.TrimSpace(item.TaskLabel)
 	}
 	for i := range mapping.Priorities {
 		item := &mapping.Priorities[i]

@@ -21,7 +21,7 @@ func TestSetAndGet_RoundTrips(t *testing.T) {
 	require.Equal(t, "ws-1", link.WorkspaceID)
 }
 
-func TestConcurrentMarkerWritesPreserveStatusAndTrackerLabel(t *testing.T) {
+func TestConcurrentStatusMarkerReadAndWrite(t *testing.T) {
 	svc := New(newFakeHost())
 	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
 	var wg sync.WaitGroup
@@ -30,7 +30,8 @@ func TestConcurrentMarkerWritesPreserveStatusAndTrackerLabel(t *testing.T) {
 	go func() { defer wg.Done(); errs <- svc.RecordPushedStatus(context.Background(), "task-1", 5) }()
 	go func() {
 		defer wg.Done()
-		errs <- svc.RecordAppliedTrackerLabel(context.Background(), "task-1", "mapped-tracker")
+		_, _, err := svc.Get(context.Background(), "task-1")
+		errs <- err
 	}()
 	wg.Wait()
 	close(errs)
@@ -42,7 +43,6 @@ func TestConcurrentMarkerWritesPreserveStatusAndTrackerLabel(t *testing.T) {
 	require.True(t, found)
 	require.NotNil(t, link.LastPushedStatusID)
 	require.Equal(t, 5, *link.LastPushedStatusID)
-	require.Equal(t, "mapped-tracker", link.AppliedTrackerLabel)
 }
 
 func TestGet_NotLinked_ReturnsNotFound(t *testing.T) {
@@ -109,22 +109,22 @@ func TestSetEchoSuppression_RoundTrips(t *testing.T) {
 	require.Equal(t, 5, *link.LastPushedStatusID)
 }
 
-func TestRecordAppliedTrackerLabel_RoundTripsAndClears(t *testing.T) {
-	svc := New(newFakeHost())
-	require.NoError(t, svc.Set(context.Background(), "task-1", "ws-1", 42, "url"))
-
-	require.NoError(t, svc.RecordAppliedTrackerLabel(context.Background(), "task-1", "mapped-tracker"))
+func TestLegacyAppliedTrackerLabelIsIgnoredAndDroppedOnWrite(t *testing.T) {
+	host := newFakeHost()
+	host.state[key(taskScope, "task-1", linkKey)] = map[string]any{
+		"issue_id":              float64(42),
+		"issue_url":             "url",
+		"workspace_id":          "ws-1",
+		"applied_tracker_label": "bug",
+	}
+	svc := New(host)
 
 	link, found, err := svc.Get(context.Background(), "task-1")
 	require.NoError(t, err)
 	require.True(t, found)
-	require.Equal(t, "mapped-tracker", link.AppliedTrackerLabel)
-
-	require.NoError(t, svc.RecordAppliedTrackerLabel(context.Background(), "task-1", ""))
-	link, found, err = svc.Get(context.Background(), "task-1")
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Empty(t, link.AppliedTrackerLabel)
+	require.Equal(t, 42, link.IssueID)
+	require.NoError(t, svc.RecordPushedStatus(context.Background(), "task-1", 5))
+	require.NotContains(t, host.state[key(taskScope, "task-1", linkKey)], "applied_tracker_label")
 }
 
 func TestConsumeStatusEcho_IsOneShot(t *testing.T) {

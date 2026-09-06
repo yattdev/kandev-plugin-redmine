@@ -98,37 +98,15 @@ func TestPoll_WatchIndexFailureCompensatesTaskAndLink(t *testing.T) {
 	svc := newWatchService(host)
 	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", ProjectID: 1, Enabled: true})
 	require.NoError(t, err)
-	// Link persistence performs two writes, the tracker marker is the third,
-	// and the watcher dedup index is the fourth.
+	// Link persistence performs two writes and the watcher dedup index is the
+	// third.
 	host.setStateCalls = 0
-	host.failSetStateAt = 4
+	host.failSetStateAt = 3
 	require.Error(t, svc.Poll(context.Background(), w, newIssuesService(t, oneIssuePage(42, "x"))))
 	require.Empty(t, host.tasks)
 	tasks, err := svc.watchTasks(context.Background(), "ws-1", w.ID)
 	require.NoError(t, err)
 	require.Empty(t, tasks)
-	_, found, err := svc.tasklinks.TaskIDForIssue(context.Background(), "ws-1", 42)
-	require.NoError(t, err)
-	require.False(t, found)
-}
-
-func TestPoll_TrackerMarkerFailureCompensatesTaskAndLink(t *testing.T) {
-	host := newFakeHost()
-	svc := newWatchService(host)
-	w, err := svc.CreateWatch(context.Background(), Watch{
-		WorkspaceID: "ws-1", ProjectID: 1, Enabled: true,
-		TrackerLabels: map[int]string{3: "bug"},
-	})
-	require.NoError(t, err)
-	host.setStateCalls = 0
-	host.failSetStateAt = 3
-	issuesSvc := newIssuesService(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"x","tracker":{"id":3}}],"total_count":1}`))
-	})
-
-	require.ErrorContains(t, svc.Poll(context.Background(), w, issuesSvc), "recording tracker label")
-	require.Empty(t, host.tasks)
-	require.Len(t, host.deletedTaskIDs(), 1)
 	_, found, err := svc.tasklinks.TaskIDForIssue(context.Background(), "ws-1", 42)
 	require.NoError(t, err)
 	require.False(t, found)
@@ -222,24 +200,25 @@ func TestPoll_CreatedTaskIsLinkedAndReverseIndexed(t *testing.T) {
 	require.False(t, found)
 }
 
-func TestPoll_CreatedTaskLinkRecordsOwnedTrackerLabel(t *testing.T) {
+func TestListWatches_IgnoresLegacyTrackerLabelMappings(t *testing.T) {
 	host := newFakeHost()
 	svc := newWatchService(host)
-	w, err := svc.CreateWatch(context.Background(), Watch{
-		WorkspaceID: "ws-1", ProjectID: 1, Enabled: true,
-		TrackerLabels: map[int]string{3: "bug"},
-	})
-	require.NoError(t, err)
-	issuesSvc := newIssuesService(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"linked","tracker":{"id":3}}],"total_count":1}`))
-	})
-	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	host.state[key(workspaceScope, "ws-1", watchesKey)] = map[string]any{
+		"watches": []any{map[string]any{
+			"id":                 "legacy",
+			"project_id":         float64(1),
+			"enabled":            true,
+			"tracker_labels":     map[string]any{"3": "bug"},
+			"priority_mappings":  map[string]any{"4": "high"},
+			"max_inflight_tasks": float64(2),
+		}},
+	}
 
-	taskID := svc.mustWatchTaskID(t, "ws-1", w.ID, 42)
-	link, found, err := svc.tasklinks.Get(context.Background(), taskID)
+	watches, err := svc.ListWatches(context.Background(), "ws-1")
 	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, "bug", link.AppliedTrackerLabel)
+	require.Len(t, watches, 1)
+	require.Equal(t, "legacy", watches[0].ID)
+	require.Equal(t, "high", watches[0].PriorityMappings[4])
 }
 
 func TestDeleteWatchFailsClosedWithoutTaskTreeManager(t *testing.T) {
@@ -300,12 +279,12 @@ func (s *Service) mustWatchTaskID(t *testing.T, workspaceID, watchID string, iss
 	return tasks[issueID]
 }
 
-func TestPoll_CreatesTaskInMappedWorkflowWithPriorityAndTrackerLabel(t *testing.T) {
+func TestPoll_CreatesTaskInMappedWorkflowWithPriority(t *testing.T) {
 	host := newFakeHost()
 	svc := newWatchService(host)
 	watchObj, err := svc.CreateWatch(context.Background(), Watch{
 		WorkspaceID: "ws-1", WorkflowID: "wf-secondary", WorkflowStepID: "step-triage", ProjectID: 1, Enabled: true,
-		TrackerLabels: map[int]string{3: "bug"}, PriorityMappings: map[int]string{4: "high"},
+		PriorityMappings: map[int]string{4: "high"},
 	})
 	require.NoError(t, err)
 	issuesSvc := newIssuesService(t, func(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +293,7 @@ func TestPoll_CreatesTaskInMappedWorkflowWithPriorityAndTrackerLabel(t *testing.
 	require.NoError(t, svc.Poll(context.Background(), watchObj, issuesSvc))
 	for _, task := range host.tasks {
 		require.Equal(t, "high", task.Priority)
-		require.Equal(t, []string{"bug"}, task.Labels)
+		require.Empty(t, task.Labels)
 	}
 	require.Len(t, host.creates, 1)
 	require.Equal(t, "wf-secondary", host.creates[0].WorkflowID)

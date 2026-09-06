@@ -60,7 +60,6 @@ type Watch struct {
 	// dynamic "Add filter" UI. The older typed fields above remain for
 	// backwards-compatible saved watches.
 	Filters          []Filter
-	TrackerLabels    map[int]string
 	PriorityMappings map[int]string
 	MaxInflightTasks int // 0 = unlimited
 	Enabled          bool
@@ -317,11 +316,6 @@ func (s *Service) watchExistsLocked(ctx context.Context, workspaceID, watchID st
 }
 
 func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) error {
-	labels := []string(nil)
-	appliedTrackerLabel := w.TrackerLabels[issue.TrackerID]
-	if appliedTrackerLabel != "" {
-		labels = []string{appliedTrackerLabel}
-	}
 	task, err := s.host.Tasks().Create(ctx, pluginsdk.CreateTaskInput{
 		WorkspaceID: w.WorkspaceID,
 		WorkflowID:  w.WorkflowID,
@@ -335,7 +329,6 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 		Title:       watcherTaskTitle(issue.ID, issue.Subject),
 		Description: issue.Description,
 		Priority:    w.PriorityMappings[issue.PriorityID],
-		Labels:      labels,
 		Metadata: map[string]any{
 			metadataKeyWatchID: w.ID,
 			metadataKeyIssueID: issue.ID,
@@ -346,9 +339,6 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 	}
 	if err := s.tasklinks.Set(ctx, task.ID, w.WorkspaceID, issue.ID, issue.URL); err != nil {
 		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: linking task %s: %w", task.ID, err))
-	}
-	if err := s.tasklinks.RecordAppliedTrackerLabel(ctx, task.ID, appliedTrackerLabel); err != nil {
-		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: recording tracker label for task %s: %w", task.ID, err))
 	}
 	if err := s.recordWatchTask(ctx, w.WorkspaceID, w.ID, issue.ID, task.ID); err != nil {
 		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: recording task %s: %w", task.ID, err))
@@ -615,9 +605,6 @@ func (w Watch) toMap() map[string]any {
 		}
 		m["filters"] = filters
 	}
-	if len(w.TrackerLabels) > 0 {
-		m["tracker_labels"] = intStringMap(w.TrackerLabels)
-	}
 	if len(w.PriorityMappings) > 0 {
 		m["priority_mappings"] = intStringMap(w.PriorityMappings)
 	}
@@ -679,7 +666,6 @@ func watchFromMap(workspaceID string, m map[string]any) Watch {
 		w.CategoryID = &id
 	}
 	w.CustomFieldFilters = stringMapToIntMap(m["custom_field_filters"])
-	w.TrackerLabels = stringMapToIntMap(m["tracker_labels"])
 	w.PriorityMappings = stringMapToIntMap(m["priority_mappings"])
 	return w
 }

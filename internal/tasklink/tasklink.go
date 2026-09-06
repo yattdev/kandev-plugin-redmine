@@ -1,9 +1,7 @@
 // Package tasklink persists the link between a Kandev task and a Redmine
 // issue, plus the echo-suppression bookkeeping internal/sync needs to keep a
-// write-back round trip from bouncing the task, and the plugin-owned
-// applied tracker-label marker internal/sync uses to reconcile mapped
-// tracker labels without clobbering user labels. The host's Tasks().Update
-// has no metadata field to write a link onto an existing task (see
+// write-back round trip from bouncing the task. The host's Tasks().Update has
+// no metadata field to write a link onto an existing task (see
 // docs/plans/redmine-plugin/task-06-task-linking-bidirectional-sync.md
 // "Plan deviations"), so the link itself is plugin-owned state — the same
 // pattern kandev-plugin-bitbucket uses for its own task-scoped link/unlink
@@ -31,12 +29,6 @@ type Link struct {
 	// (spec "Bidirectional sync"). Title/description are inbound-only — no
 	// outbound echo is recorded for them.
 	LastPushedStatusID *int
-
-	// AppliedTrackerLabel is the tracker label this plugin last applied to
-	// the task on behalf of the current field mapping. The sync loop removes
-	// exactly this label (never user labels) when the mapping changes or the
-	// tracker mapping is cleared, preserving every other label the user set.
-	AppliedTrackerLabel string
 }
 
 const (
@@ -258,24 +250,6 @@ func (s *Service) RecordPushedStatus(ctx context.Context, taskID string, statusI
 	return s.save(ctx, taskID, *link)
 }
 
-// RecordAppliedTrackerLabel records the tracker label this plugin last
-// applied to the task as part of inbound tracker reconciliation. An empty
-// label clears the marker so a later poll does not try to remove a label we
-// never wrote (or already removed).
-func (s *Service) RecordAppliedTrackerLabel(ctx context.Context, taskID, label string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	link, found, err := s.getLocked(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return fmt.Errorf("tasklink: task %s is not linked", taskID)
-	}
-	link.AppliedTrackerLabel = label
-	return s.save(ctx, taskID, *link)
-}
-
 // ConsumeStatusEcho clears the outbound status marker after the next inbound
 // observation. The marker is intentionally one-shot: a later independent
 // Redmine update back to the same value must not be suppressed forever.
@@ -366,9 +340,6 @@ func (l Link) toMap() map[string]any {
 	if l.LastPushedStatusID != nil {
 		m["last_pushed_status_id"] = *l.LastPushedStatusID
 	}
-	if l.AppliedTrackerLabel != "" {
-		m["applied_tracker_label"] = l.AppliedTrackerLabel
-	}
 	return m
 }
 
@@ -387,11 +358,9 @@ func linkFromMap(m map[string]any) Link {
 		statusID := int(v)
 		link.LastPushedStatusID = &statusID
 	}
-	if v, ok := m["applied_tracker_label"].(string); ok {
-		link.AppliedTrackerLabel = v
-	}
 	// Legacy last_pushed_title / last_pushed_description_hash entries are
-	// intentionally ignored: outbound echo state for title/description was
-	// removed; old on-disk values are simply dropped on next save.
+	// Legacy applied_tracker_label / last_pushed_title /
+	// last_pushed_description_hash entries are intentionally ignored and
+	// dropped on the next save.
 	return link
 }

@@ -3,6 +3,11 @@
 This is a task-owned, non-production verification run for the corrected
 v0.2.0 candidate. It is automated evidence, not author acceptance.
 
+> **Superseded behavior:** this run predates the accepted Host task-write
+> contract that retained labels as read-only/deprecated and exposed priority
+> writes only. Any tracker-to-Kandev-label mapping result below is historical
+> evidence for that candidate, not current plugin behavior.
+
 ## Environment
 
 - Plugin: `yattdev/kandev-plugin-redmine`, candidate branch

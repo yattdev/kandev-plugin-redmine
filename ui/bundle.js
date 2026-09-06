@@ -476,7 +476,6 @@ function makeSettingsComponent(host) {
     const [statusIDs, setStatusIDs] = React.useState([]);
     const [statusToAdd, setStatusToAdd] = React.useState("");
     const [statusSteps, setStatusSteps] = React.useState({});
-    const [trackerLabels, setTrackerLabels] = React.useState({});
     const [priorityMap, setPriorityMap] = React.useState({});
     const [saving, setSaving] = React.useState(false);
 
@@ -502,12 +501,6 @@ function makeSettingsComponent(host) {
         });
         setStatusSteps(steps);
         setStatusIDs((fields.statuses || []).filter((status) => status.workflow_step_id).map((status) => status.redmine_status_id));
-
-        const labels = {};
-        (fields.trackers || []).forEach((t) => {
-          labels[t.redmine_tracker_id] = t.task_label;
-        });
-        setTrackerLabels(labels);
 
         const priorities = {};
         (fields.priorities || []).forEach((p) => {
@@ -561,11 +554,6 @@ function makeSettingsComponent(host) {
         is_closed: s.is_closed,
         workflow_step_id: statusSteps[s.id] || "",
       }));
-      const trackers = (live.live_trackers || []).map((t) => ({
-        redmine_tracker_id: t.id,
-        redmine_name: t.name,
-        task_label: trackerLabels[t.id] || "",
-      }));
       const priorities = (live.live_priorities || []).map((p) => ({
         redmine_priority_id: p.id,
         redmine_name: p.name,
@@ -573,7 +561,7 @@ function makeSettingsComponent(host) {
       }));
       setSaving(true);
       try {
-        await invoke("fieldmapping.save", workspaceId, { workflow_id: workflowId, statuses, trackers, priorities });
+        await invoke("fieldmapping.save", workspaceId, { workflow_id: workflowId, statuses, priorities });
         toast.success("Field mapping saved.");
       } catch (err) {
         toast.error(errorMessage(err));
@@ -589,7 +577,7 @@ function makeSettingsComponent(host) {
         CardHeader,
         null,
         h(CardTitle, null, "Field mapping"),
-        h(CardDescription, null, "Map live Redmine statuses, trackers, and priorities to Kandev — nothing here is hardcoded."),
+        h(CardDescription, null, "Map live Redmine statuses and priorities to Kandev — nothing here is hardcoded."),
       ),
       h(
         CardContent,
@@ -653,28 +641,6 @@ function makeSettingsComponent(host) {
               ),
             ),
             h(Button, { type: "button", variant: "outline", "data-testid": "redmine-status-add", disabled: !statusToAdd, onClick: addStatus }, "Add status"),
-          ),
-        ),
-        h(
-          "div",
-          null,
-          h("h4", { className: "mb-2 text-sm font-medium" }, "Trackers → task label"),
-          h(
-            "div",
-            { className: "space-y-2" },
-            (live.live_trackers || []).map((tracker) =>
-              h(
-                "div",
-                { key: tracker.id, className: "flex items-center gap-2" },
-                h("span", { className: "w-32 text-sm" }, tracker.name),
-                h(Input, {
-                  "data-testid": "redmine-tracker-label-" + tracker.id,
-                  value: trackerLabels[tracker.id] || "",
-                  onChange: (e) => setTrackerLabels({ ...trackerLabels, [tracker.id]: e.target.value }),
-                  placeholder: "label",
-                }),
-              ),
-            ),
           ),
         ),
         h(
@@ -806,12 +772,8 @@ function makeSettingsComponent(host) {
     const [watches, setWatches] = React.useState([]);
     const [loading, setLoading] = React.useState(true);
     const [projects, setProjects] = React.useState([]);
-    const [trackers, setTrackers] = React.useState([]);
-    const [statuses, setStatuses] = React.useState([]);
     const [filterOptions, setFilterOptions] = React.useState({ filters: [] });
     const [newProjectId, setNewProjectId] = React.useState("");
-    const [newTrackerId, setNewTrackerId] = React.useState("");
-    const [newStatusId, setNewStatusId] = React.useState("");
     const [activeFilters, setActiveFilters] = React.useState([]);
     const [filterToAdd, setFilterToAdd] = React.useState("");
     const [refreshingFilters, setRefreshingFilters] = React.useState(false);
@@ -826,14 +788,12 @@ function makeSettingsComponent(host) {
       }
       setLoading(true);
       try {
-        const [result, projectResult, mappingResult] = await Promise.all([
-          invoke("watches.list", workspaceId, {}), invoke("projects.list", workspaceId, {}), invoke("fieldmapping.get", workspaceId, {}),
+        const [result, projectResult] = await Promise.all([
+          invoke("watches.list", workspaceId, {}), invoke("projects.list", workspaceId, {}),
         ]);
         setWatches((result && result.watches) || []);
         const selected = new Set((projectResult && projectResult.selected_ids) || []);
         setProjects(((projectResult && projectResult.projects) || []).filter((project) => selected.has(project.id)));
-        setTrackers((mappingResult && mappingResult.live_trackers) || []);
-        setStatuses((mappingResult && mappingResult.live_statuses) || []);
       } catch (err) {
         toast.error(errorMessage(err));
       } finally {
@@ -860,7 +820,7 @@ function makeSettingsComponent(host) {
     const selectProject = (value) => {
       const projectID = value === "__select_project__" ? "" : value;
       setNewProjectId(projectID);
-      setNewTrackerId(""); setNewStatusId(""); setActiveFilters([]); setFilterToAdd("");
+      setActiveFilters([]); setFilterToAdd("");
       setFilterOptions({ filters: [] });
       if (projectID) void refreshFilterOptions(projectID);
     };
@@ -875,16 +835,6 @@ function makeSettingsComponent(host) {
         toast.error("Select a project.");
         return;
       }
-      const trackerId = newTrackerId === "" ? null : Number(newTrackerId);
-      if (trackerId !== null && (!Number.isSafeInteger(trackerId) || trackerId <= 0)) {
-        toast.error("Select a valid tracker.");
-        return;
-      }
-      const statusId = newStatusId === "" ? null : Number(newStatusId);
-      if (statusId !== null && (!Number.isSafeInteger(statusId) || statusId <= 0)) {
-        toast.error("Select a valid status.");
-        return;
-      }
       if (activeFilters.some((filter) => !filter.value)) { toast.error("Choose a value for every added filter."); return; }
       const maxInflight = Number(newMaxInflight);
       if (newMaxInflight !== "" && (!Number.isSafeInteger(maxInflight) || maxInflight < 0)) {
@@ -895,15 +845,11 @@ function makeSettingsComponent(host) {
       try {
         await invoke("watches.create", workspaceId, {
           project_id: projectId,
-          tracker_id: trackerId,
-          status_id: statusId,
           filters: activeFilters,
           max_inflight_tasks: newMaxInflight === "" ? 0 : maxInflight,
           enabled: true,
         });
         setNewProjectId("");
-        setNewTrackerId("");
-        setNewStatusId("");
         setActiveFilters([]); setFilterToAdd("");
         setNewMaxInflight("");
         toast.success("Watch created.");
