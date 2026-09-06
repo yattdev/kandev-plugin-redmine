@@ -23,8 +23,10 @@ type StatusMapping struct {
 	WorkflowStepID  string `json:"workflow_step_id"`
 }
 
-// PriorityMapping maps one live Redmine priority to a Kandev task priority
-// (critical|high|medium|low).
+// PriorityMapping is retained solely to read and preserve rows written by
+// older plugin versions. The current Host plugin write contract does not
+// permit setting task priority, so new mappings are neither accepted nor
+// applied.
 type PriorityMapping struct {
 	RedminePriorityID int    `json:"redmine_priority_id"`
 	RedmineName       string `json:"redmine_name"`
@@ -41,8 +43,10 @@ type CustomField struct {
 
 // Mapping is the full persisted per-workspace field mapping.
 type Mapping struct {
-	WorkflowID string            `json:"workflow_id"`
-	Statuses   []StatusMapping   `json:"statuses"`
+	WorkflowID string          `json:"workflow_id"`
+	Statuses   []StatusMapping `json:"statuses"`
+	// Priorities holds legacy, read-only compatibility data. Do not add new
+	// callers that use it to configure task creation or updates.
 	Priorities []PriorityMapping `json:"priorities"`
 }
 
@@ -66,19 +70,6 @@ func (m Mapping) StatusForWorkflowStep(workflowStepID string) (int, bool) {
 		}
 	}
 	return 0, false
-}
-
-// TaskPriorityForRedminePriority resolves the inbound direction: a Redmine
-// priority ID to the Kandev task priority it maps to
-// (critical|high|medium|low). An empty TaskPriority entry is reported as
-// unmapped.
-func (m Mapping) TaskPriorityForRedminePriority(redminePriorityID int) (string, bool) {
-	for _, p := range m.Priorities {
-		if p.RedminePriorityID == redminePriorityID {
-			return p.TaskPriority, p.TaskPriority != ""
-		}
-	}
-	return "", false
 }
 
 const (

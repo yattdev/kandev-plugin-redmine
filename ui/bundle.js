@@ -476,7 +476,6 @@ function makeSettingsComponent(host) {
     const [statusIDs, setStatusIDs] = React.useState([]);
     const [statusToAdd, setStatusToAdd] = React.useState("");
     const [statusSteps, setStatusSteps] = React.useState({});
-    const [priorityMap, setPriorityMap] = React.useState({});
     const [saving, setSaving] = React.useState(false);
 
     const load = React.useCallback(async () => {
@@ -502,11 +501,6 @@ function makeSettingsComponent(host) {
         setStatusSteps(steps);
         setStatusIDs((fields.statuses || []).filter((status) => status.workflow_step_id).map((status) => status.redmine_status_id));
 
-        const priorities = {};
-        (fields.priorities || []).forEach((p) => {
-          priorities[p.redmine_priority_id] = p.task_priority;
-        });
-        setPriorityMap(priorities);
       } catch (err) {
         toast.error(errorMessage(err));
       } finally {
@@ -554,14 +548,9 @@ function makeSettingsComponent(host) {
         is_closed: s.is_closed,
         workflow_step_id: statusSteps[s.id] || "",
       }));
-      const priorities = (live.live_priorities || []).map((p) => ({
-        redmine_priority_id: p.id,
-        redmine_name: p.name,
-        task_priority: priorityMap[p.id] || "",
-      }));
       setSaving(true);
       try {
-        await invoke("fieldmapping.save", workspaceId, { workflow_id: workflowId, statuses, priorities });
+        await invoke("fieldmapping.save", workspaceId, { workflow_id: workflowId, statuses });
         toast.success("Field mapping saved.");
       } catch (err) {
         toast.error(errorMessage(err));
@@ -641,36 +630,6 @@ function makeSettingsComponent(host) {
               ),
             ),
             h(Button, { type: "button", variant: "outline", "data-testid": "redmine-status-add", disabled: !statusToAdd, onClick: addStatus }, "Add status"),
-          ),
-        ),
-        h(
-          "div",
-          null,
-          h("h4", { className: "mb-2 text-sm font-medium" }, "Priorities → task priority"),
-          h(
-            "div",
-            { className: "space-y-2" },
-            (live.live_priorities || []).map((priority) =>
-              h(
-                "div",
-                { key: priority.id, className: "flex items-center gap-2" },
-                h("span", { className: "w-32 text-sm" }, priority.name),
-                h(
-                  Select,
-                  {
-                    "data-testid": "redmine-priority-map-" + priority.id,
-                    value: priorityMap[priority.id] || unmappedValue,
-                    onValueChange: (value) => setPriorityMap({ ...priorityMap, [priority.id]: value === unmappedValue ? "" : value }),
-                  },
-                  h(SelectTrigger, null, h(SelectValue, null)),
-                  h(
-                    SelectContent,
-                    null,
-                    [h(SelectItem, { key: unmappedValue, value: unmappedValue }, "Unmapped")].concat(["critical", "high", "medium", "low"].map((p) => h(SelectItem, { key: p, value: p }, p))),
-                  ),
-                ),
-              ),
-            ),
           ),
         ),
         h("div", { id: "redmine-custom-fields", "data-testid": "redmine-custom-fields" },

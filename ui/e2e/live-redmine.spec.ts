@@ -50,17 +50,20 @@ test("configures the per-workspace Redmine connection and captures validation UI
   );
   const watchFilters = watchFilterOptions.filters as JsonRecord[];
   const trackerFilter = watchFilters.find((filter) => filter.field === "tracker_id");
+  const priorityFilter = watchFilters.find((filter) => filter.field === "priority_id");
   const statusFilter = watchFilters.find((filter) => filter.field === "status_id");
   expect(trackerFilter).toMatchObject({ name: "Tracker", kind: "select" });
   expect(statusFilter).toMatchObject({ name: "Status", kind: "select" });
   const liveTrackers = trackerFilter?.values as JsonRecord[];
+  const livePriorities = priorityFilter?.values as JsonRecord[];
   const watchStatuses = statusFilter?.values as JsonRecord[];
   expect(liveTrackers.length).toBeGreaterThan(0);
+  expect(livePriorities.length).toBeGreaterThan(0);
   expect(watchStatuses.length).toBeGreaterThan(0);
 
   const mapping = await invokeAction(request, workspaceId, "fieldmapping.get");
   expect(Array.isArray(mapping.live_statuses)).toBeTruthy();
-  expect(Array.isArray(mapping.live_priorities)).toBeTruthy();
+  expect(mapping.live_priorities).toBeUndefined();
   expect(Array.isArray(mapping.custom_fields)).toBeTruthy();
   expect((mapping.custom_fields as JsonRecord[]).some((field) => String(field.name).length > 0)).toBeTruthy();
   expect(mapping.custom_fields_derived).toBe(true);
@@ -80,14 +83,12 @@ test("configures the per-workspace Redmine connection and captures validation UI
   const workflowStepID = String(firstStep.id);
   const secondWorkflowStepID = String(secondStep.id);
   const liveStatuses = mapping.live_statuses as JsonRecord[];
-  const livePriorities = mapping.live_priorities as JsonRecord[];
   expect(liveStatuses.length).toBeGreaterThan(1);
   const statusID = Number(liveStatuses[0].id);
   const closedStatus = liveStatuses.find((status) => status.is_closed === true);
   expect(closedStatus, "the disposable Redmine instance must expose a closed status").toBeTruthy();
   const secondStatusID = Number(closedStatus?.id);
   const trackerID = Number(liveTrackers[0].value);
-  const priorityID = Number(livePriorities[0].id);
 
   await expect(
     invokeAction(request, workspaceId, "fieldmapping.save", {
@@ -100,10 +101,6 @@ test("configures the per-workspace Redmine connection and captures validation UI
             : Number(status.id) === secondStatusID
               ? secondWorkflowStepID
               : "",
-      })),
-      priorities: livePriorities.map((priority, index) => ({
-        redmine_priority_id: Number(priority.id),
-        task_priority: index === 0 ? "high" : "",
       })),
     }),
   ).resolves.toEqual({ saved: true });
@@ -123,7 +120,7 @@ test("configures the per-workspace Redmine connection and captures validation UI
     project_id: projectID,
     tracker_id: trackerID,
     status_id: statusID,
-    priority_id: priorityID,
+    priority_id: Number(livePriorities[0].value),
     subject: issueSubject,
     description: "Created by the plugin-owned packaged acceptance suite.",
     uploads: [uploaded],

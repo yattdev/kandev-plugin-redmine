@@ -200,7 +200,7 @@ func TestPoll_CreatedTaskIsLinkedAndReverseIndexed(t *testing.T) {
 	require.False(t, found)
 }
 
-func TestListWatches_IgnoresLegacyTrackerLabelMappings(t *testing.T) {
+func TestListWatches_IgnoresLegacyTrackerAndPriorityMappings(t *testing.T) {
 	host := newFakeHost()
 	svc := newWatchService(host)
 	host.state[key(workspaceScope, "ws-1", watchesKey)] = map[string]any{
@@ -218,7 +218,12 @@ func TestListWatches_IgnoresLegacyTrackerLabelMappings(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, watches, 1)
 	require.Equal(t, "legacy", watches[0].ID)
-	require.Equal(t, "high", watches[0].PriorityMappings[4])
+	// The old priority mapping is intentionally accepted on read and ignored;
+	// saving this watch must not perpetuate an unsupported task-write setting.
+	require.NoError(t, svc.UpdateWatch(context.Background(), watches[0]))
+	saved := host.state[key(workspaceScope, "ws-1", watchesKey)]
+	row := saved["watches"].([]any)[0].(map[string]any)
+	require.NotContains(t, row, "priority_mappings")
 }
 
 func TestDeleteWatchFailsClosedWithoutTaskTreeManager(t *testing.T) {
@@ -284,7 +289,6 @@ func TestPoll_CreatesTaskInMappedWorkflow(t *testing.T) {
 	svc := newWatchService(host)
 	watchObj, err := svc.CreateWatch(context.Background(), Watch{
 		WorkspaceID: "ws-1", WorkflowID: "wf-secondary", WorkflowStepID: "step-triage", ProjectID: 1, Enabled: true,
-		PriorityMappings: map[int]string{4: "high"},
 	})
 	require.NoError(t, err)
 	issuesSvc := newIssuesService(t, func(w http.ResponseWriter, r *http.Request) {

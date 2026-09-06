@@ -285,13 +285,11 @@ func (p *redminePlugin) handleProjectsSave(ctx context.Context, req *pluginsdk.P
 // --- fieldmapping.* -------------------------------------------------------
 
 type fieldMappingGetResponse struct {
-	WorkflowID          string                         `json:"workflow_id"`
-	Statuses            []fieldmapping.StatusMapping   `json:"statuses"`
-	Priorities          []fieldmapping.PriorityMapping `json:"priorities"`
-	LiveStatuses        []redmineNamedRef              `json:"live_statuses"`
-	LivePriorities      []redmineNamedRef              `json:"live_priorities"`
-	CustomFields        []fieldmapping.CustomField     `json:"custom_fields"`
-	CustomFieldsDerived bool                           `json:"custom_fields_derived"`
+	WorkflowID          string                       `json:"workflow_id"`
+	Statuses            []fieldmapping.StatusMapping `json:"statuses"`
+	LiveStatuses        []redmineNamedRef            `json:"live_statuses"`
+	CustomFields        []fieldmapping.CustomField   `json:"custom_fields"`
+	CustomFieldsDerived bool                         `json:"custom_fields_derived"`
 }
 
 type redmineNamedRef struct {
@@ -310,11 +308,6 @@ func (p *redminePlugin) handleFieldMappingGet(ctx context.Context, req *pluginsd
 	if err != nil {
 		return classifiedErrorResponse(err)
 	}
-	livePriorities, err := client.ListIssuePriorities(ctx)
-	if err != nil {
-		return classifiedErrorResponse(err)
-	}
-
 	customFields, derived, err := p.resolveCustomFields(ctx, client)
 	if err != nil {
 		return classifiedErrorResponse(err)
@@ -326,10 +319,9 @@ func (p *redminePlugin) handleFieldMappingGet(ctx context.Context, req *pluginsd
 	}
 
 	return jsonResponse(fieldMappingGetResponse{
-		WorkflowID: mapping.WorkflowID,
-		Statuses:   mapping.Statuses, Priorities: mapping.Priorities,
+		WorkflowID:          mapping.WorkflowID,
+		Statuses:            mapping.Statuses,
 		LiveStatuses:        toNamedRefs(liveStatuses),
-		LivePriorities:      toPriorityRefs(livePriorities),
 		CustomFields:        customFields,
 		CustomFieldsDerived: derived,
 	})
@@ -370,6 +362,13 @@ func (p *redminePlugin) resolveCustomFields(ctx context.Context, client *redmine
 }
 
 func (p *redminePlugin) handleFieldMappingSave(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(req.Body, &raw); err != nil {
+		return nil, fmt.Errorf("redmine: decoding action %q body: %w", req.ActionKey, err)
+	}
+	if _, found := raw["priorities"]; found {
+		return classifiedErrorResponse(fmt.Errorf("redmine: priority mappings are unsupported by the current Kandev Host SDK"))
+	}
 	body, err := decodeBody[fieldmapping.Mapping](req)
 	if err != nil {
 		return nil, err
@@ -384,6 +383,14 @@ func (p *redminePlugin) handleFieldMappingSave(ctx context.Context, req *plugins
 	if err := p.normalizeAndValidateMapping(ctx, client, &body); err != nil {
 		return classifiedErrorResponse(err)
 	}
+	// Preserve legacy priority rows when an operator saves current status
+	// mappings. They remain readable for compatibility but cannot affect task
+	// writes through this Host SDK.
+	previous, _, err := p.fieldmappingSvc.Get(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	body.Priorities = previous.Priorities
 	if err := p.fieldmappingSvc.Save(ctx, req.Context.WorkspaceID, body); err != nil {
 		return nil, err
 	}
@@ -395,19 +402,11 @@ func (p *redminePlugin) normalizeAndValidateMapping(ctx context.Context, client 
 	if err != nil {
 		return err
 	}
-	priorities, err := client.ListIssuePriorities(ctx)
-	if err != nil {
-		return err
-	}
 	statusByID := make(map[int]redmineclient.IssueStatus, len(statuses))
 	for _, value := range statuses {
 		statusByID[value.ID] = value
 	}
-	priorityByID := make(map[int]redmineclient.Priority, len(priorities))
-	for _, value := range priorities {
-		priorityByID[value.ID] = value
-	}
-	seenStatuses, seenPriorities := map[int]bool{}, map[int]bool{}
+	seenStatuses := map[int]bool{}
 	for i := range mapping.Statuses {
 		item := &mapping.Statuses[i]
 		live, ok := statusByID[item.RedmineStatusID]
@@ -417,18 +416,6 @@ func (p *redminePlugin) normalizeAndValidateMapping(ctx context.Context, client 
 		seenStatuses[item.RedmineStatusID] = true
 		item.RedmineName = live.Name
 		item.IsClosed = live.IsClosed
-	}
-	for i := range mapping.Priorities {
-		item := &mapping.Priorities[i]
-		live, ok := priorityByID[item.RedminePriorityID]
-		if item.RedminePriorityID <= 0 || !ok || seenPriorities[item.RedminePriorityID] {
-			return fmt.Errorf("redmine: priority mapping id %d is invalid or duplicated", item.RedminePriorityID)
-		}
-		if item.TaskPriority != "" && item.TaskPriority != "critical" && item.TaskPriority != "high" && item.TaskPriority != "medium" && item.TaskPriority != "low" {
-			return fmt.Errorf("redmine: task priority %q is invalid", item.TaskPriority)
-		}
-		seenPriorities[item.RedminePriorityID] = true
-		item.RedmineName = live.Name
 	}
 	return nil
 }
@@ -509,14 +496,6 @@ func toTrackerRefs(trackers []redmineclient.Tracker) []redmineNamedRef {
 	out := make([]redmineNamedRef, len(trackers))
 	for i, t := range trackers {
 		out[i] = redmineNamedRef{ID: t.ID, Name: t.Name}
-	}
-	return out
-}
-
-func toPriorityRefs(priorities []redmineclient.Priority) []redmineNamedRef {
-	out := make([]redmineNamedRef, len(priorities))
-	for i, pr := range priorities {
-		out[i] = redmineNamedRef{ID: pr.ID, Name: pr.Name}
 	}
 	return out
 }

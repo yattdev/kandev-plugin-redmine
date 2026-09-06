@@ -60,7 +60,6 @@ type Watch struct {
 	// dynamic "Add filter" UI. The older typed fields above remain for
 	// backwards-compatible saved watches.
 	Filters          []Filter
-	PriorityMappings map[int]string
 	MaxInflightTasks int // 0 = unlimited
 	Enabled          bool
 }
@@ -604,9 +603,6 @@ func (w Watch) toMap() map[string]any {
 		}
 		m["filters"] = filters
 	}
-	if len(w.PriorityMappings) > 0 {
-		m["priority_mappings"] = intStringMap(w.PriorityMappings)
-	}
 	return m
 }
 
@@ -665,7 +661,8 @@ func watchFromMap(workspaceID string, m map[string]any) Watch {
 		w.CategoryID = &id
 	}
 	w.CustomFieldFilters = stringMapToIntMap(m["custom_field_filters"])
-	w.PriorityMappings = stringMapToIntMap(m["priority_mappings"])
+	// priority_mappings was written by older plugin versions. Intentionally
+	// ignore it: the current Host SDK has no plugin-writable task priority.
 	return w
 }
 

@@ -79,8 +79,7 @@ calls into this plugin from the outside.
 ## Minimum host version
 
 The final `min_kandev_version` is intentionally deferred until the Kandev
-release containing the generic task priority and workflow-placement contract
-is known.
+release containing the generic workflow-placement contract is known.
 The plugin's candidate build is tested against that host change locally; do
 not treat the currently committed manifest floor as the release decision.
 

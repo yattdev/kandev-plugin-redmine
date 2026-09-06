@@ -14,13 +14,13 @@ async function loadBundleTestHooks() {
 test("mapping selects use host controls and explicitly added live statuses", () => {
   assert.match(bundle, /const unmappedValue = "__unmapped__"/);
   assert.match(bundle, /value === unmappedValue \? "" : value/);
-  assert.match(bundle, /task_priority: priorityMap\[p\.id\] \|\| ""/);
   assert.match(bundle, /redmine-status-step-\$\{status\.id\}/);
   assert.match(bundle, /redmine-status-add-select/);
   assert.match(bundle, /redmine-status-add/);
   assert.match(bundle, /redmine-status-remove-\$\{status\.id\}/);
   assert.match(bundle, /Choose a workflow step for every added Redmine status/);
-  assert.match(bundle, /redmine-priority-map-" \+ priority\.id/);
+  assert.doesNotMatch(bundle, /redmine-priority-map-/);
+  assert.doesNotMatch(bundle, /task_priority:/);
   assert.doesNotMatch(bundle, /trackerLabels|task_label|redmine-tracker-label/);
 });
 
