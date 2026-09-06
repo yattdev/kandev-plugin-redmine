@@ -21,6 +21,7 @@ test("mapping selects use host controls and explicitly added live statuses", () 
   assert.match(bundle, /Choose a workflow step for every added Redmine status/);
   assert.match(bundle, /task_priority: priorityMap\[priority\.id\] \|\| ""/);
   assert.match(bundle, /redmine-priority-map-" \+ priority\.id/);
+  assert.match(bundle, /SelectTrigger, \{ "data-testid": "redmine-priority-map-" \+ priority\.id \}/);
   assert.doesNotMatch(bundle, /trackerLabels|task_label|redmine-tracker-label/);
 });
 

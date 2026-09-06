@@ -659,11 +659,10 @@ function makeSettingsComponent(host) {
                 h(
                   Select,
                   {
-                    "data-testid": "redmine-priority-map-" + priority.id,
                     value: priorityMap[priority.id] || unmappedValue,
                     onValueChange: (value) => setPriorityMap({ ...priorityMap, [priority.id]: value === unmappedValue ? "" : value }),
                   },
-                  h(SelectTrigger, null, h(SelectValue, null)),
+                  h(SelectTrigger, { "data-testid": "redmine-priority-map-" + priority.id }, h(SelectValue, null)),
                   h(
                     SelectContent,
                     null,
