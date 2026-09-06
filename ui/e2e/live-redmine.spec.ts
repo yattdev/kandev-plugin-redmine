@@ -42,9 +42,24 @@ test("configures the per-workspace Redmine connection and captures validation UI
     invokeAction(request, workspaceId, "projects.save", { project_ids: [projectID] }),
   ).resolves.toEqual({ saved: true });
 
+  const watchFilterOptions = await invokeAction(
+    request,
+    workspaceId,
+    "watches.filter_options",
+    { project_id: projectID },
+  );
+  const watchFilters = watchFilterOptions.filters as JsonRecord[];
+  const trackerFilter = watchFilters.find((filter) => filter.field === "tracker_id");
+  const statusFilter = watchFilters.find((filter) => filter.field === "status_id");
+  expect(trackerFilter).toMatchObject({ name: "Tracker", kind: "select" });
+  expect(statusFilter).toMatchObject({ name: "Status", kind: "select" });
+  const liveTrackers = trackerFilter?.values as JsonRecord[];
+  const watchStatuses = statusFilter?.values as JsonRecord[];
+  expect(liveTrackers.length).toBeGreaterThan(0);
+  expect(watchStatuses.length).toBeGreaterThan(0);
+
   const mapping = await invokeAction(request, workspaceId, "fieldmapping.get");
   expect(Array.isArray(mapping.live_statuses)).toBeTruthy();
-  expect(Array.isArray(mapping.live_trackers)).toBeTruthy();
   expect(Array.isArray(mapping.live_priorities)).toBeTruthy();
   expect(Array.isArray(mapping.custom_fields)).toBeTruthy();
   expect((mapping.custom_fields as JsonRecord[]).some((field) => String(field.name).length > 0)).toBeTruthy();
@@ -65,14 +80,13 @@ test("configures the per-workspace Redmine connection and captures validation UI
   const workflowStepID = String(firstStep.id);
   const secondWorkflowStepID = String(secondStep.id);
   const liveStatuses = mapping.live_statuses as JsonRecord[];
-  const liveTrackers = mapping.live_trackers as JsonRecord[];
   const livePriorities = mapping.live_priorities as JsonRecord[];
   expect(liveStatuses.length).toBeGreaterThan(1);
   const statusID = Number(liveStatuses[0].id);
   const closedStatus = liveStatuses.find((status) => status.is_closed === true);
   expect(closedStatus, "the disposable Redmine instance must expose a closed status").toBeTruthy();
   const secondStatusID = Number(closedStatus?.id);
-  const trackerID = Number(liveTrackers[0].id);
+  const trackerID = Number(liveTrackers[0].value);
   const priorityID = Number(livePriorities[0].id);
 
   await expect(
@@ -86,10 +100,6 @@ test("configures the per-workspace Redmine connection and captures validation UI
             : Number(status.id) === secondStatusID
               ? secondWorkflowStepID
               : "",
-      })),
-      trackers: liveTrackers.map((tracker, index) => ({
-        redmine_tracker_id: Number(tracker.id),
-        task_label: index === 0 ? "redmine-live" : "",
       })),
       priorities: livePriorities.map((priority, index) => ({
         redmine_priority_id: Number(priority.id),
@@ -330,8 +340,27 @@ test("configures the per-workspace Redmine connection and captures validation UI
 
   await page.goto(`/settings/workspaces/${workspaceId}/integrations/redmine`);
   await expect(page.getByTestId("redmine-watch-project")).toHaveAttribute("role", "combobox");
-  await expect(page.getByTestId("redmine-watch-tracker")).toHaveAttribute("role", "combobox");
-  await expect(page.getByTestId("redmine-watch-status")).toHaveAttribute("role", "combobox");
+  await page.getByTestId("redmine-watch-project").click();
+  await page.getByRole("option", { name: String(visibleProjects[0].name), exact: true }).click();
+  await expect(page.getByTestId("redmine-watch-filters")).toBeVisible();
+  await page.getByTestId("redmine-watch-filter-add").click();
+  await page.getByRole("option", { name: "Tracker", exact: true }).click();
+  await expect(page.getByTestId("redmine-watch-filter-value-tracker_id")).toHaveAttribute(
+    "role",
+    "combobox",
+  );
+  await page.getByTestId("redmine-watch-filter-value-tracker_id").click();
+  await page.getByRole("option", { name: String(liveTrackers[0].name), exact: true }).click();
+  await page.getByTestId("redmine-watch-filter-add").click();
+  await page.getByRole("option", { name: "Status", exact: true }).click();
+  await expect(page.getByTestId("redmine-watch-filter-value-status_id")).toHaveAttribute(
+    "role",
+    "combobox",
+  );
+  await page.getByTestId("redmine-watch-filter-value-status_id").click();
+  const statusChoice = watchStatuses.find((status) => Number(status.value) === statusID);
+  expect(statusChoice).toBeTruthy();
+  await page.getByRole("option", { name: String(statusChoice?.name), exact: true }).click();
 
   // A failed/interrupted local run can leave a watch in plugin state. Remove
   // those definitions through the public action before measuring the new
@@ -349,8 +378,7 @@ test("configures the per-workspace Redmine connection and captures validation UI
   );
   const createdWatch = await invokeAction(request, workspaceId, "watches.create", {
     project_id: projectID,
-    tracker_id: trackerID,
-    status_id: null,
+    filters: [{ field: "tracker_id", operator: "=", value: String(trackerID) }],
     max_inflight_tasks: 1,
     enabled: true,
   });
