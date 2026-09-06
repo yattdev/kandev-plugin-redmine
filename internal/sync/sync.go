@@ -198,10 +198,11 @@ func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, is
 	plan := inboundPlan{update: pluginsdk.UpdateTaskInput{ID: taskID}}
 	plan.consumeStatusEcho = link.LastPushedStatusID != nil
 	statusEcho := link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
-	// The Host SDK does not expose the task's current workflow step on reads.
-	// Apply each non-echo mapped Redmine status observation through Move so a
-	// task manually moved away is reconciled on the next poll.
-	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok && !statusEcho {
+	// Reconcile a non-echo mapped Redmine status only when the task is not
+	// already in its mapped workflow step. Move emits a task update even for a
+	// same-step request, so this comparison keeps the inclusive cursor overlap
+	// from churning an otherwise synchronized task on every poll.
+	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok && !statusEcho && task.WorkflowStepID != stepID {
 		plan.workflowStepID = stepID
 	}
 	if opts.SyncTitleDescription {

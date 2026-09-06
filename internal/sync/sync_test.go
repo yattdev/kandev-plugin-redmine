@@ -156,7 +156,7 @@ func TestPollInbound_OverlappedUnchangedTitleDescriptionWritesOnce(t *testing.T)
 	require.Len(t, host.updateCalls(), 1)
 }
 
-func TestPollInbound_OverlappedMappedStatusReconcilesWithoutReadableStep(t *testing.T) {
+func TestPollInbound_OverlappedMappedStatusDoesNotMoveAlreadyAlignedTask(t *testing.T) {
 	host := newFakeHost()
 	tl := tasklink.New(host)
 	svc := New(host, tl)
@@ -169,7 +169,7 @@ func TestPollInbound_OverlappedMappedStatusReconcilesWithoutReadableStep(t *test
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
 	require.NoError(t, svc.PollInbound(context.Background(), "ws-1", issuesSvc, testMapping(), []int{1}, Options{}))
 	require.Empty(t, host.updateCalls())
-	require.Len(t, host.moveCalls(), 2)
+	require.Len(t, host.moveCalls(), 1)
 	for _, call := range host.moveCalls() {
 		require.Equal(t, "step-done", call.WorkflowStepID)
 	}

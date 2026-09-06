@@ -122,10 +122,12 @@ func (r fakeTaskReader) Move(_ context.Context, in pluginsdk.MoveTaskInput) (*pl
 	r.host.mu.Lock()
 	r.host.moves = append(r.host.moves, in)
 	err := r.host.moveErr
-	r.host.mu.Unlock()
 	if err != nil {
+		r.host.mu.Unlock()
 		return nil, err
 	}
+	r.host.task.WorkflowStepID = in.WorkflowStepID
+	r.host.mu.Unlock()
 	return &pluginsdk.MoveTaskOutcome{Task: &pluginsdk.Task{ID: in.TaskID}, Transitioned: true}, nil
 }
 
