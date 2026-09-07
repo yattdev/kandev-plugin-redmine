@@ -112,6 +112,11 @@ func (p *redminePlugin) handleIntegrationEnabledSave(ctx context.Context, req *p
 	if err := p.connectionSvc.SetEnabled(ctx, req.Context.WorkspaceID, body.Enabled); err != nil {
 		return nil, err
 	}
+	if body.Enabled {
+		// Resume persisted links promptly after the workspace switch is
+		// re-enabled instead of waiting for the normal poll cadence.
+		p.requestPoll()
+	}
 	return jsonResponse(body)
 }
 

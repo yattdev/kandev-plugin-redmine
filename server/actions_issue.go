@@ -112,6 +112,7 @@ func (p *redminePlugin) handleIssueUpdate(ctx context.Context, req *pluginsdk.Pl
 	if err := issues.New(client).UpdateIssueFields(ctx, body.IssueID, body.update()); err != nil {
 		return classifiedErrorResponse(err)
 	}
+	p.requestPoll()
 	return jsonResponse(map[string]bool{"updated": true})
 }
 
