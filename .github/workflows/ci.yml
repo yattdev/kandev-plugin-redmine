@@ -16,7 +16,7 @@ permissions:
 # provider-neutral Task.Update contract before publishing the plugin.
 env:
   KANDEV_SDK_REPOSITORY: yattdev/kandev
-  KANDEV_SDK_REF: dcfe7c400719f0fc287b4e79e4b08ecb7afe717c
+  KANDEV_SDK_REF: 5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb
 
 jobs:
   verify:

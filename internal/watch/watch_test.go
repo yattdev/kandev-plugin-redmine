@@ -291,11 +291,8 @@ func TestPoll_CreatesTaskInMappedWorkflowWithPriority(t *testing.T) {
 		_, _ = w.Write([]byte(`{"issues":[{"id":42,"subject":"New issue","tracker":{"id":3},"priority":{"id":4}}],"total_count":1}`))
 	})
 	require.NoError(t, svc.Poll(context.Background(), watchObj, issuesSvc))
-	for _, task := range host.tasks {
-		require.Equal(t, "high", task.Priority)
-		require.Empty(t, task.Labels)
-	}
 	require.Len(t, host.creates, 1)
+	require.Equal(t, "high", host.creates[0].Priority)
 	require.Equal(t, "wf-secondary", host.creates[0].WorkflowID)
 	require.NotNil(t, host.creates[0].WorkflowStepID)
 	require.Equal(t, "step-triage", *host.creates[0].WorkflowStepID)

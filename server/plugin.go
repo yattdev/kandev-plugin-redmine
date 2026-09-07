@@ -54,6 +54,7 @@ type redminePlugin struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	stopDone chan struct{}
+	pollNow  chan struct{}
 
 	connectionSvc   *connection.Service
 	projectsSvc     *projects.Service
@@ -91,6 +92,7 @@ func (p *redminePlugin) SetHost(host pluginsdk.Host) {
 	p.ready = true
 
 	p.ctx, p.cancel = context.WithCancel(context.Background())
+	p.pollNow = make(chan struct{}, 1)
 	p.healthPoller.Start(p.ctx)
 	p.wg.Add(1)
 	go p.runSyncLoop(p.ctx)
@@ -130,15 +132,41 @@ func (p *redminePlugin) stop() {
 
 func (p *redminePlugin) runSyncLoop(ctx context.Context) {
 	defer p.wg.Done()
-	ticker := time.NewTicker(configuredSyncPollInterval())
+	runPollLoop(ctx, configuredSyncPollInterval(), p.pollNow, p.pollAllWorkspaces)
+}
+
+// runPollLoop polls once when the plugin becomes available, then keeps the
+// normal cadence. In particular, an enabled plugin must not leave persisted
+// links dormant for an entire production poll interval after a host restart
+// or disable/enable cycle.
+func runPollLoop(ctx context.Context, interval time.Duration, pollNow <-chan struct{}, poll func(context.Context)) {
+	poll(ctx)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-pollNow:
+			poll(ctx)
 		case <-ticker.C:
-			p.pollAllWorkspaces(ctx)
+			poll(ctx)
 		}
+	}
+}
+
+// requestPoll wakes the single poll loop after a successful plugin-owned
+// Redmine mutation. The buffered, coalescing signal keeps cursor updates
+// serialized with the regular cadence and never delays the action response.
+func (p *redminePlugin) requestPoll() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.ready || p.pollNow == nil {
+		return
+	}
+	select {
+	case p.pollNow <- struct{}{}:
+	default:
 	}
 }
 
@@ -207,6 +235,12 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 				return err
 			}
 		}
+		if mappingFound {
+			// Priority mappings are workspace settings, unlike a watch's
+			// placement. Resolve them on every poll so new watcher tasks use a
+			// changed setting without requiring each watch to be edited.
+			w = applyWatchPriorityMapping(w, mapping)
+		}
 		if err := p.watchSvc.Poll(ctx, w, issuesSvc); err != nil {
 			return err
 		}
@@ -215,7 +249,7 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 }
 
 func needsWatchBackfill(w watch.Watch) bool {
-	return w.WorkflowID == "" || (w.StatusID != nil && w.WorkflowStepID == "") || w.PriorityMappings == nil
+	return w.WorkflowID == "" || (w.StatusID != nil && w.WorkflowStepID == "")
 }
 
 func applyWatchMapping(w watch.Watch, mapping fieldmapping.Mapping) watch.Watch {
@@ -223,6 +257,10 @@ func applyWatchMapping(w watch.Watch, mapping fieldmapping.Mapping) watch.Watch 
 	if w.StatusID != nil {
 		w.WorkflowStepID, _ = mapping.WorkflowStepForStatus(*w.StatusID)
 	}
+	return applyWatchPriorityMapping(w, mapping)
+}
+
+func applyWatchPriorityMapping(w watch.Watch, mapping fieldmapping.Mapping) watch.Watch {
 	w.PriorityMappings = make(map[int]string, len(mapping.Priorities))
 	for _, priority := range mapping.Priorities {
 		w.PriorityMappings[priority.RedminePriorityID] = priority.TaskPriority

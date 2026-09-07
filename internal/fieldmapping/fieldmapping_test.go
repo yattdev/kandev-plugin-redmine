@@ -62,6 +62,15 @@ func TestDeriveCustomFieldsFromIssues_UnionsAndDedupsByID(t *testing.T) {
 	require.ElementsMatch(t, []int{1, 2, 3}, ids)
 }
 
+func TestDeriveCustomFieldsFromIssues_PreservesKnownNameWhenLaterObservationOmitsIt(t *testing.T) {
+	fields := DeriveCustomFieldsFromIssues([][]CustomField{
+		{{ID: 7, Name: "Customer tier"}},
+		{{ID: 7, Name: ""}},
+	})
+
+	require.Equal(t, []CustomField{{ID: 7, Name: "Customer tier"}}, fields)
+}
+
 func TestDeriveCustomFieldsFromIssues_NoIssues_ReturnsEmpty(t *testing.T) {
 	fields := DeriveCustomFieldsFromIssues(nil)
 	require.Empty(t, fields)
@@ -114,17 +123,16 @@ func TestMappingIgnoresLegacyTrackerLabelState(t *testing.T) {
 }
 
 func TestTaskPriorityForRedminePriority_ResolvesConfiguredNonEmptyMapping(t *testing.T) {
-	m := Mapping{Priorities: []PriorityMapping{
+	mapping := Mapping{Priorities: []PriorityMapping{
 		{RedminePriorityID: 4, TaskPriority: "high"},
 		{RedminePriorityID: 5, TaskPriority: ""},
 	}}
 
-	priority, ok := m.TaskPriorityForRedminePriority(4)
+	priority, ok := mapping.TaskPriorityForRedminePriority(4)
 	require.True(t, ok)
 	require.Equal(t, "high", priority)
-
-	_, ok = m.TaskPriorityForRedminePriority(5)
+	_, ok = mapping.TaskPriorityForRedminePriority(5)
 	require.False(t, ok)
-	_, ok = m.TaskPriorityForRedminePriority(99)
+	_, ok = mapping.TaskPriorityForRedminePriority(99)
 	require.False(t, ok)
 }

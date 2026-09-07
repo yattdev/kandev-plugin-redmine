@@ -166,7 +166,7 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 	}
 
 	plan := buildInboundPlan(taskID, *task, *link, issue, mapping, opts)
-	if plan.changed {
+	if plan.updateChanged {
 		if _, err := s.host.Tasks().Update(ctx, plan.update); err != nil {
 			if status.Code(err) == codes.NotFound {
 				return s.tasklink.Unset(ctx, taskID)
@@ -174,12 +174,23 @@ func (s *Service) applyInbound(ctx context.Context, workspaceID string, issue is
 			return fmt.Errorf("sync: applying inbound update to task %s: %w", taskID, err)
 		}
 	}
+	if plan.workflowStepID != "" {
+		if _, err := s.host.Tasks().Move(ctx, pluginsdk.MoveTaskInput{
+			TaskID: taskID, WorkflowStepID: plan.workflowStepID,
+		}); err != nil {
+			if status.Code(err) == codes.NotFound {
+				return s.tasklink.Unset(ctx, taskID)
+			}
+			return fmt.Errorf("sync: applying inbound workflow step to task %s: %w", taskID, err)
+		}
+	}
 	return s.finishInbound(ctx, taskID, plan)
 }
 
 type inboundPlan struct {
 	update            pluginsdk.UpdateTaskInput
-	changed           bool
+	updateChanged     bool
+	workflowStepID    string
 	consumeStatusEcho bool
 }
 
@@ -187,16 +198,19 @@ func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, is
 	plan := inboundPlan{update: pluginsdk.UpdateTaskInput{ID: taskID}}
 	plan.consumeStatusEcho = link.LastPushedStatusID != nil
 	statusEcho := link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
+	// Reconcile a non-echo mapped Redmine status only when the task is not
+	// already in its mapped workflow step. Move emits a task update even for a
+	// same-step request, so this comparison keeps the inclusive cursor overlap
+	// from churning an otherwise synchronized task on every poll.
 	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok && !statusEcho && task.WorkflowStepID != stepID {
-		plan.update.WorkflowStepID = &stepID
-		plan.changed = true
+		plan.workflowStepID = stepID
 	}
 	if opts.SyncTitleDescription {
-		plan.changed = applyTitleAndDescriptionInbound(&plan.update, issue, task) || plan.changed
+		plan.updateChanged = applyTitleAndDescriptionInbound(&plan.update, issue, task)
 	}
 	if priority, ok := mapping.TaskPriorityForRedminePriority(issue.PriorityID); ok && task.Priority != priority {
 		plan.update.Priority = &priority
-		plan.changed = true
+		plan.updateChanged = true
 	}
 	return plan
 }

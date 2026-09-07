@@ -688,10 +688,43 @@ func TestHandleAction_FieldMappingSaveValidatesAndNormalizesLiveValues(t *testin
 	loaded := handle(t, p, "fieldmapping.get", "ws-1", "", nil)
 	require.NotContains(t, loaded, "trackers")
 	require.NotContains(t, loaded, "live_trackers")
+	require.Contains(t, loaded, "priorities")
+	require.Contains(t, loaded, "live_priorities")
 	duplicate := map[string]any{"workflow_id": "wf-1", "statuses": []any{map[string]any{"redmine_status_id": 1}, map[string]any{"redmine_status_id": 1}}}
 	require.NotEmpty(t, handle(t, p, "fieldmapping.save", "ws-1", "", duplicate)["error"])
 	invalidPriority := map[string]any{"workflow_id": "wf-1", "priorities": []any{map[string]any{"redmine_priority_id": 3, "task_priority": "urgent"}}}
 	require.NotEmpty(t, handle(t, p, "fieldmapping.save", "ws-1", "", invalidPriority)["error"])
+}
+
+func TestHandleAction_FieldMappingGet_NonAdminDerivesNamedCustomField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/current.json":
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+		case "/issue_statuses.json":
+			_, _ = w.Write([]byte(`{"issue_statuses":[]}`))
+		case "/enumerations/issue_priorities.json":
+			_, _ = w.Write([]byte(`{"issue_priorities":[]}`))
+		case "/custom_fields.json":
+			w.WriteHeader(http.StatusForbidden)
+		case "/issues.json":
+			require.Equal(t, "*", r.URL.Query().Get("status_id"))
+			_, _ = w.Write([]byte(`{"issues":[
+				{"id":1,"custom_fields":[{"id":7,"name":"Customer tier","value":"Gold"}]},
+				{"id":2,"custom_fields":[{"id":7,"value":"Silver"}]}
+			],"total_count":2}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p, _ := newTestPlugin(t)
+	handle(t, p, "connection.save", "ws-1", "", map[string]any{"base_url": srv.URL, "api_key": "key"})
+	loaded := handle(t, p, "fieldmapping.get", "ws-1", "", nil)
+
+	require.Equal(t, true, loaded["custom_fields_derived"])
+	require.Equal(t, []any{map[string]any{"id": float64(7), "name": "Customer tier"}}, loaded["custom_fields"])
 }
 
 func TestHandleAction_SyncOptionsGetRoundTripsAndPreservesOtherToggle(t *testing.T) {
@@ -720,6 +753,15 @@ func TestApplyWatchMapping_BackfillsLegacyWatchPlacementAndAttributes(t *testing
 	require.Equal(t, "step-triage", backfilled.WorkflowStepID)
 	require.Equal(t, "high", backfilled.PriorityMappings[4])
 	require.False(t, needsWatchBackfill(backfilled))
+}
+
+func TestApplyWatchPriorityMapping_RefreshesChangedWorkspacePriority(t *testing.T) {
+	watchObj := watch.Watch{PriorityMappings: map[int]string{4: "high"}}
+	refreshed := applyWatchPriorityMapping(watchObj, fieldmapping.Mapping{
+		Priorities: []fieldmapping.PriorityMapping{{RedminePriorityID: 4, TaskPriority: "low"}},
+	})
+
+	require.Equal(t, "low", refreshed.PriorityMappings[4])
 }
 
 func TestOnEvent_TaskMoved_AutoWritebackEnabled_PushesStatus(t *testing.T) {

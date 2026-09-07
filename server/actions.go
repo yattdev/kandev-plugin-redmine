@@ -112,6 +112,11 @@ func (p *redminePlugin) handleIntegrationEnabledSave(ctx context.Context, req *p
 	if err := p.connectionSvc.SetEnabled(ctx, req.Context.WorkspaceID, body.Enabled); err != nil {
 		return nil, err
 	}
+	if body.Enabled {
+		// Resume persisted links promptly after the workspace switch is
+		// re-enabled instead of waiting for the normal poll cadence.
+		p.requestPoll()
+	}
 	return jsonResponse(body)
 }
 
@@ -314,7 +319,6 @@ func (p *redminePlugin) handleFieldMappingGet(ctx context.Context, req *pluginsd
 	if err != nil {
 		return classifiedErrorResponse(err)
 	}
-
 	customFields, derived, err := p.resolveCustomFields(ctx, client)
 	if err != nil {
 		return classifiedErrorResponse(err)
@@ -515,8 +519,8 @@ func toTrackerRefs(trackers []redmineclient.Tracker) []redmineNamedRef {
 
 func toPriorityRefs(priorities []redmineclient.Priority) []redmineNamedRef {
 	out := make([]redmineNamedRef, len(priorities))
-	for i, pr := range priorities {
-		out[i] = redmineNamedRef{ID: pr.ID, Name: pr.Name}
+	for i, priority := range priorities {
+		out[i] = redmineNamedRef{ID: priority.ID, Name: priority.Name}
 	}
 	return out
 }

@@ -52,6 +52,56 @@ func TestConfiguredSyncPollInterval(t *testing.T) {
 	require.Equal(t, defaultSyncPollInterval, configuredSyncPollInterval())
 }
 
+func TestRunPollLoopPollsImmediatelyAfterStartAndRestart(t *testing.T) {
+	// A plugin enable starts a fresh loop after disable stopped the old one.
+	// Both loops must poll before the normal production cadence elapses.
+	for _, phase := range []string{"start", "restart"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			polls := make(chan struct{}, 1)
+			pollNow := make(chan struct{}, 1)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				runPollLoop(ctx, time.Hour, pollNow, func(context.Context) { polls <- struct{}{} })
+			}()
+
+			select {
+			case <-polls:
+			case <-time.After(time.Second):
+				t.Fatal("initial poll did not run immediately")
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("poll loop did not stop after cancellation")
+			}
+		})
+	}
+}
+
+func TestRunPollLoopWakesPromptlyAfterSuccessfulRedmineMutation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	polls := make(chan struct{}, 2)
+	pollNow := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPollLoop(ctx, time.Hour, pollNow, func(context.Context) { polls <- struct{}{} })
+	}()
+	<-polls // initial startup poll
+	pollNow <- struct{}{}
+	select {
+	case <-polls:
+	case <-time.After(time.Second):
+		t.Fatal("mutation-triggered poll did not run promptly")
+	}
+	cancel()
+	<-done
+}
+
 func stateKeyOf(scope, scopeID, key string) string { return scope + "/" + scopeID + "/" + key }
 
 func (h *fakeHost) GetState(_ context.Context, scope, scopeID, key string) (map[string]any, bool, error) {
@@ -163,7 +213,7 @@ func (r fakeTaskReader) Create(_ context.Context, in pluginsdk.CreateTaskInput) 
 	r.host.mu.Lock()
 	defer r.host.mu.Unlock()
 	r.host.nextID++
-	task := &pluginsdk.Task{ID: fmt.Sprintf("task-%d", r.host.nextID), WorkspaceID: in.WorkspaceID, Title: in.Title, Description: in.Description, State: "RUNNING", Priority: in.Priority, Metadata: in.Metadata}
+	task := &pluginsdk.Task{ID: fmt.Sprintf("task-%d", r.host.nextID), WorkspaceID: in.WorkspaceID, Title: in.Title, Description: in.Description, State: "RUNNING", Metadata: in.Metadata}
 	r.host.tasks[task.ID] = task
 	return task, nil
 }

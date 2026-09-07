@@ -503,10 +503,11 @@ function makeSettingsComponent(host) {
         setStatusIDs((fields.statuses || []).filter((status) => status.workflow_step_id).map((status) => status.redmine_status_id));
 
         const priorities = {};
-        (fields.priorities || []).forEach((p) => {
-          priorities[p.redmine_priority_id] = p.task_priority;
+        (fields.priorities || []).forEach((priority) => {
+          priorities[priority.redmine_priority_id] = priority.task_priority;
         });
         setPriorityMap(priorities);
+
       } catch (err) {
         toast.error(errorMessage(err));
       } finally {
@@ -554,10 +555,10 @@ function makeSettingsComponent(host) {
         is_closed: s.is_closed,
         workflow_step_id: statusSteps[s.id] || "",
       }));
-      const priorities = (live.live_priorities || []).map((p) => ({
-        redmine_priority_id: p.id,
-        redmine_name: p.name,
-        task_priority: priorityMap[p.id] || "",
+      const priorities = (live.live_priorities || []).map((priority) => ({
+        redmine_priority_id: priority.id,
+        redmine_name: priority.name,
+        task_priority: priorityMap[priority.id] || "",
       }));
       setSaving(true);
       try {
@@ -658,11 +659,10 @@ function makeSettingsComponent(host) {
                 h(
                   Select,
                   {
-                    "data-testid": "redmine-priority-map-" + priority.id,
                     value: priorityMap[priority.id] || unmappedValue,
                     onValueChange: (value) => setPriorityMap({ ...priorityMap, [priority.id]: value === unmappedValue ? "" : value }),
                   },
-                  h(SelectTrigger, null, h(SelectValue, null)),
+                  h(SelectTrigger, { "data-testid": "redmine-priority-map-" + priority.id }, h(SelectValue, null)),
                   h(
                     SelectContent,
                     null,

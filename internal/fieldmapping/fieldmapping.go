@@ -129,8 +129,15 @@ func DeriveCustomFieldsFromIssues(issuesFields [][]CustomField) []CustomField {
 	order := make([]int, 0)
 	for _, fields := range issuesFields {
 		for _, f := range fields {
-			if _, ok := seen[f.ID]; !ok {
+			previous, ok := seen[f.ID]
+			if !ok {
 				order = append(order, f.ID)
+			}
+			// Issue-list responses can omit a custom-field name on a later
+			// observation. Keep the usable name already observed for the same
+			// ID rather than replacing it with an unnamed field in the fallback.
+			if f.Name == "" && previous.Name != "" {
+				f.Name = previous.Name
 			}
 			seen[f.ID] = f
 		}
