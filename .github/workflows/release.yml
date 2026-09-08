@@ -27,13 +27,14 @@ on:
 permissions:
   contents: write
 
-# RELEASE BLOCKER: this candidate SHA carries the provider-neutral host
-# contract from kdlbs/kandev#2872. The publish job deliberately refuses a
-# fork contract. Replace both values with the first upstream release that
-# contains the merged contract before creating a Redmine release.
+# RELEASE BLOCKER: v0.93.0 is the latest canonical tag checked while this
+# repair was prepared. It does not contain the provider-neutral contract from
+# kdlbs/kandev#2872, so preflight fails before any release mutation. Update
+# this pin only to the first canonical release that contains that commit.
 env:
-  KANDEV_SDK_REPOSITORY: yattdev/kandev
-  KANDEV_SDK_REF: dcfe7c400719f0fc287b4e79e4b08ecb7afe717c
+  KANDEV_SDK_REPOSITORY: kdlbs/kandev
+  KANDEV_SDK_REF: v0.93.0
+  KANDEV_REQUIRED_CONTRACT_COMMIT: 5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb
 
 jobs:
   prepare:
@@ -57,6 +58,13 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
+
+      - name: Require a released upstream SDK contract
+        env:
+          SDK_REPOSITORY: ${{ env.KANDEV_SDK_REPOSITORY }}
+          SDK_REF: ${{ env.KANDEV_SDK_REF }}
+          REQUIRED_CONTRACT_COMMIT: ${{ env.KANDEV_REQUIRED_CONTRACT_COMMIT }}
+        run: scripts/require-released-kandev-sdk-contract.sh
 
       - name: Compute next release version
         id: version
@@ -162,25 +170,19 @@ jobs:
       }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require a released upstream SDK contract
-        env:
-          SDK_REPOSITORY: ${{ env.KANDEV_SDK_REPOSITORY }}
-          SDK_REF: ${{ env.KANDEV_SDK_REF }}
-        run: |
-          test "$SDK_REPOSITORY" = "kdlbs/kandev" || {
-            echo "Release blocked: SDK contract still points at $SDK_REPOSITORY@$SDK_REF." >&2
-            exit 1
-          }
-          case "$SDK_REF" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "Release blocked: SDK ref must be an upstream release tag, got $SDK_REF." >&2; exit 1 ;;
-          esac
-
       - name: Checkout plugin
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           path: plugin
           ref: ${{ github.event_name == 'push' && github.ref || needs.prepare.outputs.tag }}
+
+      - name: Require a released upstream SDK contract
+        working-directory: plugin
+        env:
+          SDK_REPOSITORY: ${{ env.KANDEV_SDK_REPOSITORY }}
+          SDK_REF: ${{ env.KANDEV_SDK_REF }}
+          REQUIRED_CONTRACT_COMMIT: ${{ env.KANDEV_REQUIRED_CONTRACT_COMMIT }}
+        run: scripts/require-released-kandev-sdk-contract.sh
 
       - name: Checkout kandev SDK contract
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
