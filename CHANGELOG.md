@@ -1,12 +1,5 @@
 # Changelog
 
-## [0.3.2] - 2026-09-14
-
-### Changed
-
-- fix: decode both Redmine possible_values wire formats (08182cf)
-
-
 ## [0.3.1] - 2026-09-14
 
 ### Changed
