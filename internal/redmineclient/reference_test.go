@@ -123,15 +123,15 @@ func TestListCustomFields_LabeledObjectPossibleValues(t *testing.T) {
 	require.Equal(t, []string{"Bronze", "Silver"}, fields[0].PossibleValues)
 }
 
-// Mixed arrays and entries without a value or label still decode; entries
-// that are neither strings nor objects (a number) are skipped rather than
-// failing the whole response.
+// Mixed arrays still decode; objects without a value and entries that are
+// neither strings nor valid value objects are skipped rather than failing the
+// whole response.
 func TestListCustomFields_MixedAndMalformedPossibleValues(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"custom_fields":[
-			{"id":1,"name":"Mixed","possible_values":["Plain",{"value":"V","label":"L"},{}]},
-			{"id":2,"name":"Numeric","possible_values":[42,"Ok"]},
+			{"id":1,"name":"Mixed","possible_values":["Plain",{"value":"V","label":"L"},{},{"label":"No value"}]},
+			{"id":2,"name":"Malformed","possible_values":[42,null,{"value":false},"Ok"]},
 			{"id":3,"name":"Nullable","possible_values":null},
 			{"id":4,"name":"Absent"}
 		]}`))
@@ -142,7 +142,7 @@ func TestListCustomFields_MixedAndMalformedPossibleValues(t *testing.T) {
 	fields, err := c.ListCustomFields(context.Background())
 	require.NoError(t, err)
 	require.Len(t, fields, 4)
-	require.Equal(t, []string{"Plain", "V", ""}, fields[0].PossibleValues)
+	require.Equal(t, []string{"Plain", "V"}, fields[0].PossibleValues)
 	require.Equal(t, []string{"Ok"}, fields[1].PossibleValues)
 	require.Empty(t, fields[2].PossibleValues)
 	require.Empty(t, fields[3].PossibleValues)

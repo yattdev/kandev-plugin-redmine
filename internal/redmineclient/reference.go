@@ -132,22 +132,22 @@ func (p *possibleValues) UnmarshalJSON(data []byte) error {
 	for _, raw := range rawEntries {
 		trimmed := bytes.TrimSpace(raw)
 		if len(trimmed) == 4 && string(trimmed) == "null" {
-			values = append(values, "")
-			continue
-		}
-		// The 6.0 entry shape: {"value": ..., "label": ...}. label is kept on
-		// the wire for upstream UI display but this plugin maps by value.
-		var labeled struct {
-			Value string `json:"value"`
-		}
-		if err := json.Unmarshal(trimmed, &labeled); err == nil {
-			values = append(values, labeled.Value)
 			continue
 		}
 		// The 5.x entry shape: a plain string.
 		var plain string
 		if err := json.Unmarshal(trimmed, &plain); err == nil {
 			values = append(values, plain)
+			continue
+		}
+		// The 6.0 entry shape: {"value": ..., "label": ...}. label is kept on
+		// the wire for upstream UI display but this plugin maps by value. A
+		// pointer distinguishes an explicitly empty value from a missing value.
+		var labeled struct {
+			Value *string `json:"value"`
+		}
+		if err := json.Unmarshal(trimmed, &labeled); err == nil && labeled.Value != nil {
+			values = append(values, *labeled.Value)
 			continue
 		}
 		// Neither shape matches (a number, a bare boolean, ...): skip rather
