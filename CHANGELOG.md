@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1] - 2026-09-14
+
+### Changed
+
+- fix: pin SDK contract to released kandev v0.94.0 (03b2754)
+- fix: preflight released SDK contract (980dead)
+
+
 ## [0.3.0] - 2026-09-08
 
 ### Changed
