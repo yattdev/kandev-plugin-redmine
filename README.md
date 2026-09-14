@@ -78,11 +78,14 @@ calls into this plugin from the outside.
 
 ## Minimum host version
 
-The final `min_kandev_version` is intentionally deferred until the Kandev
-release containing the generic task priority and workflow-placement contract
-is known.
-The plugin's candidate build is tested against that host change locally; do
-not treat the currently committed manifest floor as the release decision.
+`min_kandev_version: "0.94.0"` — kdlbs/kandev v0.94.0 is the first
+upstream release containing the generic task priority and
+workflow-placement contract from kdlbs/kandev#2872 (merge commit
+`5f5b1f0`, merged 2026-09-06). Verified against the kandev history:
+`git merge-base --is-ancestor 5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb v0.94.0`
+succeeds, while the same check against `v0.93.0` fails. The release
+workflow's preflight (`scripts/require-released-kandev-sdk-contract.sh`)
+revalidates that ancestry before any release mutation.
 
 It is **release-only by design**: a host built from a git checkout reports a
 git-describe version like `v0.87.1-27-g4705f1fd0`, which isn't a release

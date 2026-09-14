@@ -41,9 +41,9 @@ run_case() {
   test "$actual" = "$expected" || { echo "$name: expected exit $expected, got $actual" >&2; exit 1; }
 }
 
-env_base=(env SDK_REPOSITORY=kdlbs/kandev SDK_REF=v0.93.0 REQUIRED_CONTRACT_COMMIT=5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb)
+env_base=(env SDK_REPOSITORY=kdlbs/kandev SDK_REF=v0.94.0 REQUIRED_CONTRACT_COMMIT=5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb)
 
-run_case invalid-repository 1 env SDK_REPOSITORY=yattdev/kandev SDK_REF=v0.93.0 REQUIRED_CONTRACT_COMMIT=5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb
+run_case invalid-repository 1 env SDK_REPOSITORY=yattdev/kandev SDK_REF=v0.94.0 REQUIRED_CONTRACT_COMMIT=5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb
 test ! -s "$tmp/git.log" || { echo "invalid repository contacted git" >&2; exit 1; }
 assert_state_unchanged
 
@@ -51,12 +51,12 @@ run_case raw-sha 1 env SDK_REPOSITORY=kdlbs/kandev SDK_REF=5f5b1f0f319e688c7aa4f
 test ! -s "$tmp/git.log" || { echo "raw SHA contacted git" >&2; exit 1; }
 assert_state_unchanged
 
-run_case missing-tag 1 env GIT_SCENARIO=missing-tag SDK_REPOSITORY=kdlbs/kandev SDK_REF=v0.93.0 REQUIRED_CONTRACT_COMMIT=5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb
+run_case missing-tag 1 env GIT_SCENARIO=missing-tag SDK_REPOSITORY=kdlbs/kandev SDK_REF=v0.94.0 REQUIRED_CONTRACT_COMMIT=5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb
 grep -q 'ls-remote' "$tmp/git.log"
 test "$(wc -l <"$tmp/git.log")" = 1 || { echo "missing tag continued after lookup" >&2; exit 1; }
 assert_state_unchanged
 
-run_case missing-contract 1 env GIT_SCENARIO=missing-contract SDK_REPOSITORY=kdlbs/kandev SDK_REF=v0.93.0 REQUIRED_CONTRACT_COMMIT=5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb
+run_case missing-contract 1 env GIT_SCENARIO=missing-contract SDK_REPOSITORY=kdlbs/kandev SDK_REF=v0.94.0 REQUIRED_CONTRACT_COMMIT=5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb
 grep -q 'merge-base --is-ancestor' "$tmp/git.log"
 assert_state_unchanged
 
