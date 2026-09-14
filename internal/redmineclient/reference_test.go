@@ -92,6 +92,80 @@ func TestListCustomFields_AdminKey_ReturnsFields(t *testing.T) {
 	require.Equal(t, "Severity", fields[0].Name)
 }
 
+// Redmine 5.x sends possible_values as a plain string array.
+func TestListCustomFields_LegacyStringPossibleValues(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"custom_fields":[{"id":5,"name":"Severity","possible_values":["Blocker","Critical"]}]}`))
+	}))
+	defer srv.Close()
+
+	c := redmineclient.New(srv.URL, "admin-key", srv.Client())
+	fields, err := c.ListCustomFields(context.Background())
+	require.NoError(t, err)
+	require.Len(t, fields, 1)
+	require.Equal(t, []string{"Blocker", "Critical"}, fields[0].PossibleValues)
+}
+
+// Redmine 6.0 sends possible_values as {value,label} objects; the plugin
+// maps by value, not label.
+func TestListCustomFields_LabeledObjectPossibleValues(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"custom_fields":[{"id":1,"name":"Tier","possible_values":[{"value":"Bronze","label":"Bronze"},{"value":"Silver","label":"Ag"}]}]}`))
+	}))
+	defer srv.Close()
+
+	c := redmineclient.New(srv.URL, "admin-key", srv.Client())
+	fields, err := c.ListCustomFields(context.Background())
+	require.NoError(t, err)
+	require.Len(t, fields, 1)
+	require.Equal(t, []string{"Bronze", "Silver"}, fields[0].PossibleValues)
+}
+
+// Mixed arrays and entries without a value or label still decode; entries
+// that are neither strings nor objects (a number) are skipped rather than
+// failing the whole response.
+func TestListCustomFields_MixedAndMalformedPossibleValues(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"custom_fields":[
+			{"id":1,"name":"Mixed","possible_values":["Plain",{"value":"V","label":"L"},{}]},
+			{"id":2,"name":"Numeric","possible_values":[42,"Ok"]},
+			{"id":3,"name":"Nullable","possible_values":null},
+			{"id":4,"name":"Absent"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	c := redmineclient.New(srv.URL, "admin-key", srv.Client())
+	fields, err := c.ListCustomFields(context.Background())
+	require.NoError(t, err)
+	require.Len(t, fields, 4)
+	require.Equal(t, []string{"Plain", "V", ""}, fields[0].PossibleValues)
+	require.Equal(t, []string{"Ok"}, fields[1].PossibleValues)
+	require.Empty(t, fields[2].PossibleValues)
+	require.Empty(t, fields[3].PossibleValues)
+}
+
+// The frozen live Redmine 6.0 response shape (task ecd8b857 evidence
+// redmine60-custom-fields-shape.json): list field with value/label objects
+// alongside a string field with no possible_values key.
+func TestListCustomFields_Redmine60LiveShape(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"custom_fields":[{"id":1,"name":"E2E Customer Tier","field_format":"list","possible_values":[{"value":"Bronze","label":"Bronze"},{"value":"Silver","label":"Silver"},{"value":"Gold","label":"Gold"}]},{"id":2,"name":"E2E Environment","field_format":"string"}]}`))
+	}))
+	defer srv.Close()
+
+	c := redmineclient.New(srv.URL, "admin-key", srv.Client())
+	fields, err := c.ListCustomFields(context.Background())
+	require.NoError(t, err)
+	require.Len(t, fields, 2)
+	require.Equal(t, []string{"Bronze", "Silver", "Gold"}, fields[0].PossibleValues)
+	require.Empty(t, fields[1].PossibleValues)
+}
+
 func TestListCustomFields_NonAdminKey_ReturnsPermissionDeniedKindError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

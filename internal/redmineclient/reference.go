@@ -1,7 +1,9 @@
 package redmineclient
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -108,6 +110,56 @@ func (c *Client) ListIssuePriorities(ctx context.Context) ([]Priority, error) {
 	return out.IssuePriorities, nil
 }
 
+// possibleValues decodes Redmine's two wire formats for a list custom
+// field's possible_values. Redmine 5.x sends an array of plain strings;
+// Redmine 6.0 sends an array of {"value": ..., "label": ...} objects
+// (upstream CustomFieldValueLabel). Both — and mixed arrays of the two —
+// normalize to the value string so every consumer sees one shape.
+type possibleValues []string
+
+func (p *possibleValues) UnmarshalJSON(data []byte) error {
+	var rawEntries []json.RawMessage
+	if err := json.Unmarshal(data, &rawEntries); err != nil {
+		// Covers null, a non-array, or any unexpected scalar shape; keep the
+		// field empty for null and surface the shape mismatch otherwise.
+		if string(data) == "null" {
+			*p = nil
+			return nil
+		}
+		return fmt.Errorf("redmineclient: possible_values must be an array: %w", err)
+	}
+	values := make(possibleValues, 0, len(rawEntries))
+	for i, raw := range rawEntries {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 4 && string(trimmed) == "null" {
+			values = append(values, "")
+			continue
+		}
+		// The 6.0 entry shape: {"value": ..., "label": ...}. label is kept on
+		// the wire for upstream UI display but this plugin maps by value.
+		var labeled struct {
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal(trimmed, &labeled); err == nil {
+			values = append(values, labeled.Value)
+			continue
+		}
+		// The 5.x entry shape: a plain string.
+		var plain string
+		if err := json.Unmarshal(trimmed, &plain); err == nil {
+			values = append(values, plain)
+			continue
+		}
+		// Neither shape matches (a number, a bare boolean, ...): skip rather
+		// than fail the whole /custom_fields.json decode, but note it. A
+		// skipped entry diverges from the wire ordering only for data no
+		// known Redmine produces.
+		fmt.Printf("redmineclient: skipping malformed possible_values entry %d: %s\n", i, trimmed)
+	}
+	*p = values
+	return nil
+}
+
 // CustomFieldDef is one entry from /custom_fields.json — admin-only on
 // Redmine; a non-admin key gets a 403 (surfaced here as *APIError with Kind
 // ErrKindPermissionDenied while /users/current.json still authenticates,
@@ -119,6 +171,24 @@ type CustomFieldDef struct {
 	ID             int      `json:"id"`
 	Name           string   `json:"name"`
 	PossibleValues []string `json:"possible_values"`
+}
+
+// UnmarshalJSON normalizes the two possible_values wire formats onto a
+// plain []string (see possibleValues) so consumers never see the 6.0 entry
+// objects.
+func (d *CustomFieldDef) UnmarshalJSON(data []byte) error {
+	var shadow struct {
+		ID             int            `json:"id"`
+		Name           string         `json:"name"`
+		PossibleValues possibleValues `json:"possible_values"`
+	}
+	if err := json.Unmarshal(data, &shadow); err != nil {
+		return err
+	}
+	d.ID = shadow.ID
+	d.Name = shadow.Name
+	d.PossibleValues = shadow.PossibleValues
+	return nil
 }
 
 type customFieldsResponse struct {
