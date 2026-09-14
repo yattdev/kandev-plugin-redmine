@@ -129,7 +129,7 @@ func (p *possibleValues) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("redmineclient: possible_values must be an array: %w", err)
 	}
 	values := make(possibleValues, 0, len(rawEntries))
-	for i, raw := range rawEntries {
+	for _, raw := range rawEntries {
 		trimmed := bytes.TrimSpace(raw)
 		if len(trimmed) == 4 && string(trimmed) == "null" {
 			values = append(values, "")
@@ -151,10 +151,9 @@ func (p *possibleValues) UnmarshalJSON(data []byte) error {
 			continue
 		}
 		// Neither shape matches (a number, a bare boolean, ...): skip rather
-		// than fail the whole /custom_fields.json decode, but note it. A
-		// skipped entry diverges from the wire ordering only for data no
-		// known Redmine produces.
-		fmt.Printf("redmineclient: skipping malformed possible_values entry %d: %s\n", i, trimmed)
+		// than fail the whole /custom_fields.json decode. A skipped entry
+		// diverges from the wire ordering only for data no known Redmine
+		// produces.
 	}
 	*p = values
 	return nil
