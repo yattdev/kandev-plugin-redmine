@@ -27,13 +27,13 @@ on:
 permissions:
   contents: write
 
-# RELEASE BLOCKER: v0.93.0 is the latest canonical tag checked while this
-# repair was prepared. It does not contain the provider-neutral contract from
-# kdlbs/kandev#2872, so preflight fails before any release mutation. Update
-# this pin only to the first canonical release that contains that commit.
+# v0.94.0 is the first canonical release containing the provider-neutral
+# contract from kdlbs/kandev#2872 (merge commit 5f5b1f0, merged 2026-09-06;
+# v0.93.0 predates it). The preflight validates that ancestry before any
+# release mutation.
 env:
   KANDEV_SDK_REPOSITORY: kdlbs/kandev
-  KANDEV_SDK_REF: v0.93.0
+  KANDEV_SDK_REF: v0.94.0
   KANDEV_REQUIRED_CONTRACT_COMMIT: 5f5b1f0f319e688c7aa4f161c30e0dd024d3f1eb
 
 jobs:
